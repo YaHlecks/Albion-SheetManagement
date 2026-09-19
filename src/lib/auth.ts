@@ -1,0 +1,132 @@
+import { cache } from "react";
+import { createSupabaseServerClient } from "./supabase-server";
+import { createAdminClient, hasServiceRole } from "./supabase-admin";
+
+export type AccountStatus = "pending" | "approved" | "rejected" | "suspended" | "archived";
+
+export interface SessionContext {
+  userId: string;
+  email: string;
+  profile: {
+    id: string;
+    ign: string;
+    discord: string | null;
+    status: AccountStatus;
+    isPlatformAdmin: boolean;
+    createdAt: string;
+    lastLoginAt: string | null;
+  } | null;
+  isApproved: boolean;
+  isPlatformAdmin: boolean;
+}
+
+/**
+ * Resolve the current session: auth user + profile row + status flags.
+ * Returns null when not signed in. Cached per request.
+ */
+export const getSessionContext = cache(async (): Promise<SessionContext | null> => {
+  const supabase = await createSupabaseServerClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  if (!user) return null;
+
+  let profile: SessionContext["profile"] = null;
+  let isPlatformAdmin = false;
+  if (hasServiceRole()) {
+    const admin = createAdminClient();
+    const { data } = await admin
+      .from("profiles")
+      .select("id, ign, discord, status, is_platform_admin, created_at, last_login_at")
+      .eq("id", user.id)
+      .maybeSingle();
+    if (data) {
+      profile = {
+        id: data.id,
+        ign: data.ign,
+        discord: data.discord ?? null,
+        status: data.status as AccountStatus,
+        isPlatformAdmin: Boolean(data.is_platform_admin),
+        createdAt: data.created_at,
+        lastLoginAt: data.last_login_at ?? null,
+      };
+      isPlatformAdmin = profile.isPlatformAdmin;
+    }
+  } else {
+    // Fallback: RLS-visible profile row + security-definer admin RPC.
+    const { data: row } = await supabase
+      .from("profiles")
+      .select("id, ign, discord, status, is_platform_admin, created_at, last_login_at")
+      .eq("id", user.id)
+      .maybeSingle();
+    if (row) {
+      profile = {
+        id: row.id,
+        ign: row.ign,
+        discord: row.discord ?? null,
+        status: row.status as AccountStatus,
+        isPlatformAdmin: Boolean(row.is_platform_admin),
+        createdAt: row.created_at,
+        lastLoginAt: row.last_login_at ?? null,
+      };
+    }
+    const { data: flag } = await supabase.rpc("is_platform_admin");
+    isPlatformAdmin = flag === true || (profile?.isPlatformAdmin ?? false);
+  }
+
+  return {
+    userId: user.id,
+    email: user.email ?? "",
+    profile,
+    isApproved: profile?.status === "approved",
+    isPlatformAdmin,
+  };
+});
+
+export async function requireSession(): Promise<SessionContext> {
+  const ctx = await getSessionContext();
+  if (!ctx) throw new AuthError("UNAUTHENTICATED");
+  return ctx;
+}
+
+export async function requireApproved(): Promise<SessionContext> {
+  const ctx = await requireSession();
+  if (!ctx.isApproved) throw new AuthError("NOT_APPROVED", ctx.profile?.status);
+  return ctx;
+}
+
+export async function requireAdmin(): Promise<SessionContext> {
+  const ctx = await requireApproved();
+  if (!ctx.isPlatformAdmin) throw new AuthError("FORBIDDEN");
+  return ctx;
+}
+
+export class AuthError extends Error {
+  code: string;
+  status?: string;
+  constructor(code: string, status?: string) {
+    super(code);
+    this.code = code;
+    this.status = status;
+  }
+}
+
+export function authErrorResponse(error: unknown): Response {
+  if (error instanceof AuthError) {
+    const messages: Record<string, string> = {
+      UNAUTHENTICATED: "You must be signed in to do that.",
+      NOT_APPROVED: "Your account is not approved yet.",
+      SUSPENDED: "Your account has been suspended.",
+      FORBIDDEN: "You do not have permission to do that.",
+    };
+    const code =
+      error.code === "NOT_APPROVED" && error.status === "suspended" ? "SUSPENDED" : error.code;
+    return Response.json({ error: messages[code] ?? error.code }, { status: code === "UNAUTHENTICATED" ? 401 : 403 });
+  }
+  console.error("[auth] unexpected error", error);
+  return Response.json({ error: "Something went wrong. Please try again." }, { status: 500 });
+}
+
+export type { TeamRole } from "./roles";
+export { TEAM_ROLES, isTeamRole } from "./roles";
