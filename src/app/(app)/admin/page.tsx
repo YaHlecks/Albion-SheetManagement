@@ -1,190 +1,148 @@
 import Link from "next/link";
-import { ChevronRight, Inbox, ShieldCheck } from "lucide-react";
+import { ChevronRight, Users } from "lucide-react";
 import { requireAdminPage } from "@/lib/api";
 import { createSupabaseServerClient } from "@/lib/supabase-server";
-import { createAdminClient, hasServiceRole } from "@/lib/supabase-admin";
 import { Badge, EmptyState, StatCard } from "@/components/ui";
-import { formatDateTime, timeAgo } from "@/lib/utils";
 
 export const dynamic = "force-dynamic";
-export const metadata = { title: "Admin Dashboard" };
+export const metadata = { title: "Admin" };
 
-export default async function AdminDashboard() {
+export default async function AdminDashboardPage() {
+  await requireAdminPage();
   const supabase = await createSupabaseServerClient();
 
-  const { count: totalUsers } = await supabase
-    .from("profiles")
-    .select("id", { count: "exact", head: true });
-  const { count: pendingUsers } = await supabase
-    .from("profiles")
-    .select("id", { count: "exact", head: true })
-    .eq("status", "pending");
-  const { count: activeTeams } = await supabase
-    .from("teams")
-    .select("id", { count: "exact", head: true })
-    .in("status", ["open", "draft", "locked"]);
-  const { count: totalChanges } = await supabase
-    .from("audit_logs")
-    .select("id", { count: "exact", head: true });
+  const [{ count: publishedCount }, { count: draftCount }, { count: pendingCount }, { data: upcoming }] =
+    await Promise.all([
+      supabase.from("events").select("id", { count: "exact", head: true }).eq("status", "published"),
+      supabase.from("events").select("id", { count: "exact", head: true }).eq("status", "draft"),
+      supabase.from("profiles").select("id", { count: "exact", head: true }).eq("status", "pending"),
+      supabase
+        .from("events")
+        .select("id, title, event_date, massing_time, timezone, location, status")
+        .in("status", ["draft", "published", "locked"])
+        .order("event_date", { ascending: true, nullsFirst: false })
+        .limit(5),
+    ]);
 
-  const { data: pending } = await supabase
-    .from("profiles")
-    .select("id, ign, discord, created_at")
-    .eq("status", "pending")
-    .order("created_at", { ascending: true })
-    .limit(5);
+  // One aggregate fill-count query for the upcoming list.
+  const eventIds = (upcoming ?? []).map((e) => e.id);
+  const fillCounts: Record<string, { filled: number; total: number }> = {};
+  for (const e of upcoming ?? []) fillCounts[e.id] = { filled: 0, total: 0 };
+  if (eventIds.length > 0) {
+    const { data: agg } = await supabase
+      .from("event_slots")
+      .select("id, event_signups(id), event_parties!inner(event_id)")
+      .in("event_parties.event_id", eventIds);
+    for (const row of (agg ?? []) as unknown as Array<{
+      event_parties: { event_id: string } | { event_id: string }[];
+      event_signups: unknown[];
+    }>) {
+      const ep = Array.isArray(row.event_parties) ? row.event_parties[0] : row.event_parties;
+      const bucket = ep ? fillCounts[ep.event_id] : undefined;
+      if (!bucket) continue;
+      bucket.total += 1;
+      if (Array.isArray(row.event_signups) && row.event_signups.length > 0) bucket.filled += 1;
+    }
+  }
 
   const { data: recent } = await supabase
     .from("audit_logs")
-    .select("id, action, created_at, actor_id, target_user_id, team_id, meta, profiles:actor_id(ign), teams(name)")
+    .select("id, action, created_at, actor_id, profiles:actor_id(ign)")
     .order("created_at", { ascending: false })
     .limit(8);
-
-  const { data: teams } = await supabase
-    .from("teams")
-    .select("id, name, status, sheet_locked")
-    .in("status", ["open", "draft", "locked"])
-    .order("created_at", { ascending: false })
-    .limit(5);
-
-  const teamCounts = new Map<string, number>();
-  const { data: counts } = await supabase.from("team_members").select("team_id");
-  for (const c of counts ?? []) {
-    teamCounts.set(c.team_id, (teamCounts.get(c.team_id) ?? 0) + 1);
-  }
 
   return (
     <div className="mx-auto max-w-6xl space-y-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h1 className="font-display text-2xl font-bold tracking-tight">Admin Dashboard</h1>
-          <p className="mt-1 text-sm text-muted">System overview and pending actions.</p>
+          <h1 className="font-display text-2xl font-bold tracking-tight">Admin</h1>
+          <p className="mt-1 text-sm text-muted">Events, members, and oversight.</p>
         </div>
-        <Link href="/admin/approvals" className="btn btn-primary btn-sm gap-1.5">
-          <ShieldCheck size={15} /> Review approvals ({pendingUsers ?? 0})
-        </Link>
+        <Link href="/admin/events/new" className="btn btn-primary">+ Create Event</Link>
       </div>
 
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <StatCard label="Total users" value={totalUsers ?? 0} href="/admin/accounts" />
-        <StatCard label="Pending approvals" value={pendingUsers ?? 0} tone="warn" href="/admin/approvals" />
-        <StatCard label="Active teams" value={activeTeams ?? 0} href="/admin/teams" />
-        <StatCard label="Recorded events" value={totalChanges ?? 0} hint="audit entries" href="/admin/activity" />
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <StatCard label="Published events" value={publishedCount ?? 0} tone="success" href="/admin/events?tab=active" />
+        <StatCard label="Drafts" value={draftCount ?? 0} href="/admin/events?tab=drafts" />
+        <StatCard label="Pending members" value={pendingCount ?? 0} tone={(pendingCount ?? 0) > 0 ? "warn" : "default"} href="/admin/approvals" />
+        <StatCard label="Members" value="…" href="/admin/accounts" hint="All accounts" />
       </div>
 
-      <div className="grid gap-6 lg:grid-cols-2">
-        {/* Pending approvals */}
-        <section className="panel p-5">
-          <div className="mb-3 flex items-center justify-between">
-            <h2 className="section-title">Pending approvals</h2>
-            <Inbox size={15} className="text-faint" />
-          </div>
-          {!pending || pending.length === 0 ? (
-            <p className="py-6 text-center text-sm text-muted">No pending registrations. All clear.</p>
-          ) : (
-            <ul className="divide-y divide-line">
-              {pending.map((p) => (
-                <li key={p.id} className="flex items-center justify-between gap-3 py-2.5">
-                  <div className="min-w-0">
-                    <p className="truncate text-sm font-semibold">{p.ign}</p>
-                    <p className="text-xs text-faint">Registered {formatDateTime(p.created_at)}</p>
-                  </div>
-                  <Link href={`/admin/accounts/${p.id}`} className="btn btn-secondary btn-sm shrink-0">
-                    Review
-                  </Link>
-                </li>
-              ))}
-            </ul>
-          )}
-          {pending && pending.length > 0 ? (
-            <Link href="/admin/approvals" className="mt-3 inline-flex items-center gap-1 text-sm text-brand hover:underline">
-              All approvals <ChevronRight size={14} />
-            </Link>
-          ) : null}
-        </section>
-
-        {/* Active teams */}
-        <section className="panel p-5">
-          <div className="mb-3 flex items-center justify-between">
-            <h2 className="section-title">Active teams</h2>
-          </div>
-          {!teams || teams.length === 0 ? (
-            <p className="py-6 text-center text-sm text-muted">No active teams yet. Create one in Teams.</p>
-          ) : (
-            <ul className="divide-y divide-line">
-              {teams.map((t) => (
-                <li key={t.id} className="flex items-center justify-between gap-3 py-2.5">
-                  <div className="min-w-0">
-                    <p className="truncate text-sm font-semibold">{t.name}</p>
-                    <p className="text-xs text-faint">{teamCounts.get(t.id) ?? 0} members</p>
-                  </div>
-                  <Badge status={t.status} />
-                </li>
-              ))}
-            </ul>
-          )}
-          <Link href="/admin/teams" className="mt-3 inline-flex items-center gap-1 text-sm text-brand hover:underline">
-            Manage teams <ChevronRight size={14} />
-          </Link>
-        </section>
-      </div>
-
-      {/* Recent activity */}
-      <section className="panel p-5">
-        <div className="mb-3 flex items-center justify-between">
-          <h2 className="section-title">Recent activity</h2>
-          <Link href="/admin/activity" className="link-brand text-sm">Full activity log</Link>
+      <section className="space-y-3">
+        <div className="flex items-center justify-between">
+          <h2 className="section-title">Next events</h2>
+          <Link href="/admin/events" className="link-brand text-sm">All events <ChevronRight className="inline" size={14} /></Link>
         </div>
-        {!recent || recent.length === 0 ? (
-          <p className="py-6 text-center text-sm text-muted">No recorded activity yet.</p>
+        {!upcoming || upcoming.length === 0 ? (
+          <EmptyState
+            title="No events yet"
+            description="Create your first mass — parties, builds, publish, and members sign up."
+            action={<Link href="/admin/events/new" className="btn btn-primary">Create Event</Link>}
+          />
         ) : (
-          <ul className="divide-y divide-line">
-            {recent.map((r) => {
-              const actor = Array.isArray(r.profiles) ? r.profiles[0] : r.profiles;
-              const team = Array.isArray(r.teams) ? r.teams[0] : r.teams;
+          <div className="space-y-2">
+            {upcoming.map((event) => {
+              const counts = fillCounts[event.id] ?? { filled: 0, total: 0 };
               return (
-                <li key={r.id} className="flex items-center justify-between gap-3 py-2.5 text-sm">
-                  <span className="min-w-0 truncate">
-                    <span className="font-semibold">{typeof actor === "object" && actor ? (actor as { ign: string }).ign : "System"}</span>{" "}
-                    <span className="text-muted">{describeAction(r.action, r.meta)}</span>
-                    {typeof team === "object" && team ? <span className="text-faint"> · {((team as { name: string }).name)}</span> : null}
-                  </span>
-                  <span className="shrink-0 text-xs text-faint">{timeAgo(r.created_at)}</span>
-                </li>
+                <Link key={event.id} href={`/admin/events/${event.id}`} className="panel panel-hover flex flex-wrap items-center justify-between gap-3 p-4 transition-colors">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <h3 className="truncate font-medium">{event.title}</h3>
+                      <Badge status={event.status === "published" ? "approved" : event.status === "locked" ? "locked" : "draft"} />
+                    </div>
+                    <p className="mt-0.5 text-xs text-faint">
+                      {[event.location, event.event_date, event.massing_time ? `${event.massing_time.slice(0, 5)} ${event.timezone}` : null].filter(Boolean).join(" · ") || "Details inside"}
+                    </p>
+                  </div>
+                  <span className="text-sm font-semibold">{counts.filled} / {counts.total} filled</span>
+                </Link>
               );
             })}
-          </ul>
+          </div>
         )}
       </section>
+
+      <div className="grid gap-6 lg:grid-cols-2">
+        <section className="space-y-3">
+          <div className="flex items-center justify-between">
+            <h2 className="section-title">Members</h2>
+            <Link href="/admin/approvals" className="link-brand text-sm">Approvals <ChevronRight className="inline" size={14} /></Link>
+          </div>
+          <div className="panel flex items-center gap-4 p-4">
+            <Users className="text-brand" size={22} />
+            <div>
+              <p className="text-sm font-medium">{pendingCount ?? 0} pending approval</p>
+              <p className="text-xs text-faint">Approve, suspend or review accounts in Members.</p>
+            </div>
+            <Link href="/admin/accounts" className="btn btn-secondary btn-sm ml-auto">Manage</Link>
+          </div>
+        </section>
+
+        <section className="space-y-3">
+          <div className="flex items-center justify-between">
+            <h2 className="section-title">Recent activity</h2>
+            <Link href="/admin/activity" className="link-brand text-sm">Audit log <ChevronRight className="inline" size={14} /></Link>
+          </div>
+          <div className="panel divide-y divide-line p-0">
+            {(recent ?? []).length === 0 ? (
+              <p className="p-4 text-sm text-muted">No activity recorded yet.</p>
+            ) : (
+              (recent ?? []).map((row) => {
+                const actor = Array.isArray(row.profiles) ? row.profiles[0] : row.profiles;
+                return (
+                  <div key={row.id} className="flex items-center justify-between gap-3 px-4 py-2.5 text-sm">
+                    <span className="truncate">
+                      <span className="font-medium">{(actor as { ign?: string } | null)?.ign ?? "System"}</span>
+                      <span className="text-muted"> · {row.action.replaceAll("_", " ").toLowerCase()}</span>
+                    </span>
+                    <span className="shrink-0 text-xs text-faint">{new Date(row.created_at).toLocaleString()}</span>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </section>
+      </div>
     </div>
   );
-}
-
-function describeAction(action: string, meta: Record<string, unknown>): string {
-  switch (action) {
-    case "USER_REGISTERED": return "registered an account";
-    case "USER_APPROVED": return "was approved";
-    case "USER_REJECTED": return "was rejected";
-    case "USER_SUSPENDED": return "was suspended";
-    case "USER_REACTIVATED": return "was reactivated";
-    case "USER_ARCHIVED": return "was archived";
-    case "USER_LOGIN": return "signed in";
-    case "USER_LOGOUT": return "signed out";
-    case "TEAM_CREATED": return `created team ${String(meta.name ?? "")}`.trim();
-    case "TEAM_RENAMED": return `renamed team: ${String(meta.previous ?? "")} → ${String(meta.new ?? "")}`;
-    case "TEAM_ARCHIVED": return "archived a team";
-    case "TEAM_OPENED": return "opened a team";
-    case "MEMBER_ADDED": return "was added to a team";
-    case "MEMBER_REMOVED": return "was removed from a team";
-    case "SHEET_LOCKED": return "locked a sheet";
-    case "SHEET_UNLOCKED": return "unlocked a sheet";
-    case "FIELD_UPDATED": {
-      const field = String(meta.field ?? "field");
-      const prev = meta.previous ? String(meta.previous) : "empty";
-      const next = meta.new ? String(meta.new) : "empty";
-      return `updated ${field}: ${prev} → ${next}`;
-    }
-    case "CHANGE_REVERTED": return `reverted ${String(meta.field ?? "a field")}`;
-    default: return action.toLowerCase().replaceAll("_", " ");
-  }
 }

@@ -1,12 +1,12 @@
 import Link from "next/link";
 import {
   ArrowRight,
-  ClipboardList,
+  CalendarClock,
   Eye,
-  History,
+  Bell,
   Lock,
   ShieldCheck,
-  UserCheck,
+  Swords,
   Users,
 } from "lucide-react";
 import { Logo } from "@/components/ui";
@@ -15,34 +15,34 @@ export const dynamic = "force-static";
 
 const features = [
   {
-    icon: ClipboardList,
-    title: "Controlled Team Sheets",
-    text: "Only authorized members can access team information, and every member edits only what belongs to them.",
+    icon: Swords,
+    title: "Mass Spreadsheet Builder",
+    text: "Build parties and slots with roles and required equipment in minutes — no more rebuilding the same sheet every week.",
   },
   {
-    icon: UserCheck,
-    title: "Account Approval",
-    text: "Administrators control who joins the system. New registrations wait in a review queue before gaining access.",
+    icon: CalendarClock,
+    title: "Event Scheduling",
+    text: "Location, set, date, massing time and caller — published events show members exactly when and where to show up.",
   },
   {
     icon: Users,
-    title: "Team-Based Access",
-    text: "Members see exactly the teams they belong to — nothing more, nothing less.",
+    title: "Member Self-Registration",
+    text: "Members browse open slots and sign themselves in with their IGN. One signup per member, one member per slot — enforced by the database.",
+  },
+  {
+    icon: Bell,
+    title: "Instant Notifications",
+    text: "Publishing an event notifies every approved member. Locked, completed or cancelled events are announced too.",
   },
   {
     icon: Eye,
-    title: "Activity Tracking",
-    text: "Every important change is recorded automatically: who changed what, when, and from which value to which.",
+    title: "Live Updates",
+    text: "When someone claims a slot, everyone viewing the sheet sees it instantly — no manual refreshing during form-up.",
   },
   {
     icon: ShieldCheck,
-    title: "Moderation",
-    text: "Suspend disruptive accounts, remove members, and lock sheets without losing any history.",
-  },
-  {
-    icon: History,
-    title: "Change History",
-    text: "Previous values are preserved. Administrators can inspect any change and restore the earlier value with one click.",
+    title: "Admin Oversight",
+    text: "Approve members, move or remove signups, lock the roster, and audit every action. Row-level security enforces it all in the database.",
   },
 ];
 
@@ -55,7 +55,7 @@ export default function LandingPage() {
           <Link href="/" className="flex items-center gap-2.5">
             <Logo />
             <span className="font-display text-[17px] font-bold tracking-tight">
-              Albion <span className="text-brand">Team Sheets</span>
+              Albion <span className="text-brand">Event Sheets</span>
             </span>
           </Link>
           <nav className="hidden items-center gap-6 text-sm text-muted md:flex" aria-label="Main">
@@ -76,12 +76,12 @@ export default function LandingPage() {
           <div className="max-w-3xl">
             <p className="badge badge-admin mb-5 inline-flex">Built for Albion Online guilds</p>
             <h1 className="hero-title">
-              Build your Albion teams without the{" "}
+              Run your Albion masses without the{" "}
               <span className="text-brand">chaos of shared spreadsheets</span>.
             </h1>
             <p className="mt-5 max-w-2xl text-lg text-muted">
-              Controlled team sheets, approved members, activity tracking, and administrator
-              moderation in one place.
+              The admin plans the mass, publishes the sheet, and members sign themselves into
+              slots. Parties, builds, priorities and signups — all in one live, audited place.
             </p>
             <div className="mt-8 flex flex-wrap gap-3">
               <Link href="/register" className="btn btn-primary h-11 px-6 text-sm">
@@ -96,7 +96,7 @@ export default function LandingPage() {
                 <Lock size={14} className="text-brand" /> Row-level security enforced in the database
               </span>
               <span className="inline-flex items-center gap-2">
-                <Eye size={14} className="text-brand" /> Full change history on every sheet
+                <Eye size={14} className="text-brand" /> Every action audited
               </span>
             </div>
           </div>
@@ -107,11 +107,11 @@ export default function LandingPage() {
       <section id="features" className="border-b border-line py-20">
         <div className="mx-auto max-w-6xl px-4 sm:px-6">
           <h2 className="font-display text-3xl font-bold tracking-tight">
-            Everything a roster needs, nothing it doesn&apos;t
+            Everything a mass needs, nothing it doesn&apos;t
           </h2>
           <p className="mt-3 max-w-2xl text-muted">
-            Replace unrestricted spreadsheet editing with an approval-gated, permissioned and
-            fully-audited system designed for real guild operations.
+            One purpose: the caller prepares the sheet, members fill the slots, the roster is
+            locked and the mass happens.
           </p>
           <div className="mt-10 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {features.map((f) => (
@@ -135,18 +135,18 @@ export default function LandingPage() {
             {[
               {
                 step: "1",
-                title: "Register",
-                text: "Create an account with your in-game name. It waits for administrator approval.",
+                title: "Admin builds the event",
+                text: "Parties, roles, required builds, priorities and instructions — then publish.",
               },
               {
                 step: "2",
-                title: "Get assigned",
-                text: "An admin approves your account and adds you to your teams. You get notified instantly.",
+                title: "Members get notified",
+                text: "Every approved member sees the event and claims the slot that fits their build.",
               },
               {
                 step: "3",
-                title: "Fill your sheet",
-                text: "Update your role, weapon, availability and notes. Every change is tracked and restorable.",
+                title: "Lock and run the mass",
+                text: "Watch signups fill live, lock the roster, mark it complete afterwards.",
               },
             ].map((s) => (
               <li key={s.step} className="panel p-6">
@@ -167,11 +167,11 @@ export default function LandingPage() {
           <div className="panel overflow-hidden">
             <div className="landing-grid px-6 py-14 text-center sm:px-12">
               <h2 className="font-display text-3xl font-bold tracking-tight">
-                Stop fighting spreadsheets. Start running teams.
+                Stop fighting spreadsheets. Start running masses.
               </h2>
               <p className="mx-auto mt-3 max-w-xl text-muted">
-                Know who changed what, approve who joins, and keep every roster reliable — with
-                moderation tools built for real guild leadership.
+                Plan events in advance, let members sign themselves up, and keep a full audit
+                trail — with moderation tools built for real guild leadership.
               </p>
               <div className="mt-8 flex flex-wrap justify-center gap-3">
                 <Link href="/register" className="btn btn-primary h-11 px-7">
@@ -191,7 +191,7 @@ export default function LandingPage() {
         <div className="mx-auto flex max-w-6xl flex-col items-center justify-between gap-3 px-4 text-sm text-faint sm:flex-row sm:px-6">
           <div className="flex items-center gap-2">
             <Logo size={22} />
-            <span>Albion Team Sheets</span>
+            <span>Albion Event Sheets</span>
           </div>
           <p>Not affiliated with Sandbox Interactive. Built for the Albion community.</p>
         </div>

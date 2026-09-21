@@ -7,9 +7,7 @@ import {
   Activity,
   Bell,
   CheckCheck,
-  ClipboardList,
-  ScrollText,
-  FolderKanban,
+  Swords,
   LayoutDashboard,
   LogOut,
   Menu,
@@ -42,17 +40,16 @@ interface NotificationItem {
 
 const memberNav = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
-  { href: "/teams", label: "My Teams", icon: ClipboardList },
+  { href: "/events", label: "Events", icon: Swords },
   { href: "/notifications", label: "Notifications", icon: Bell },
   { href: "/profile", label: "Profile", icon: UserCircle2 },
 ];
 
 const adminNav = [
   { href: "/admin", label: "Dashboard", icon: LayoutDashboard },
+  { href: "/admin/events", label: "Events", icon: Swords },
   { href: "/admin/approvals", label: "Approvals", icon: ShieldCheck },
   { href: "/admin/accounts", label: "Members", icon: Users },
-  { href: "/admin/teams", label: "Teams", icon: FolderKanban },
-  { href: "/admin/sheets", label: "Mass Sheets", icon: ScrollText },
   { href: "/admin/activity", label: "Activity", icon: Activity },
   { href: "/admin/settings", label: "Settings", icon: Settings },
 ];
@@ -124,12 +121,6 @@ export function AppShell({ user, children }: { user: ShellUser; children: React.
     setSigningOut(true);
     try {
       const supabase = createBrowserClient();
-      await supabase.rpc("log_audit", {
-        p_action: "USER_LOGOUT",
-        p_target_user_id: null,
-        p_team_id: null,
-        p_meta: {},
-      });
       await supabase.auth.signOut();
       router.replace("/login");
     } finally {
@@ -151,8 +142,7 @@ export function AppShell({ user, children }: { user: ShellUser; children: React.
     <div className="flex h-full flex-col">
       <div className="flex h-16 items-center gap-2.5 border-b border-line px-5">
         <Logo />
-        <span className="font-display text-[15px] font-bold tracking-tight">
-          Albion <span className="text-brand">Team Sheets</span>
+        <span className="font-display text-[15px] font-bold tracking-tight">                Albion <span className="text-brand">Event Sheets</span>
         </span>
       </div>
       <nav className="flex-1 space-y-1 overflow-y-auto p-3" aria-label="App navigation">
@@ -220,7 +210,7 @@ export function AppShell({ user, children }: { user: ShellUser; children: React.
               <Menu size={18} />
             </button>
             <span className="font-display text-sm font-semibold text-muted lg:hidden">
-              Albion <span className="text-brand">Team Sheets</span>
+              Albion <span className="text-brand">Event Sheets</span>
             </span>
           </div>
 

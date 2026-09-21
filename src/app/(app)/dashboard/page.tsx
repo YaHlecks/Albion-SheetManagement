@@ -1,194 +1,142 @@
 import Link from "next/link";
-import { ClipboardList, Bell, ChevronRight, History } from "lucide-react";
+import { CalendarDays, ChevronRight, Swords } from "lucide-react";
 import { requirePageSession } from "@/lib/api";
 import { createSupabaseServerClient } from "@/lib/supabase-server";
 import { Badge, EmptyState, StatCard } from "@/components/ui";
-import { timeAgo } from "@/lib/utils";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Dashboard" };
 
-interface TeamCard {
-  id: string;
-  name: string;
-  status: string;
-  sheet_locked: boolean;
-  description: string | null;
-  member_count: number;
-  my_role: string;
-}
-
-export interface OwnActivityRow {
-  id: string;
-  action: string;
-  created_at: string;
-  meta: Record<string, unknown> | null;
-  team_name: string | null;
-}
-
-/**
- * Members may not read the audit_logs table (admin-only by RLS). The
- * security-definer recent_own_activity RPC returns only events where the
- * caller is the actor or the target — the database does the filtering.
- */
-async function fetchMemberActivity(
-  supabase: Awaited<ReturnType<typeof createSupabaseServerClient>>,
-  limit = 8
-): Promise<OwnActivityRow[]> {
-  const { data, error } = await supabase.rpc("recent_own_activity", { p_limit: limit });
-  if (error) {
-    // Never break the dashboard over activity listing.
-    console.error("[dashboard] recent_own_activity failed", error.message);
-    return [];
-  }
-  return (data ?? []) as OwnActivityRow[];
-}
-
-export default async function MemberDashboard() {
+export default async function DashboardPage() {
   const ctx = await requirePageSession();
   const supabase = await createSupabaseServerClient();
 
-  // My team memberships (direct join; RLS limits team_members to visible rows).
-  const { data: memberships } = await supabase
-    .from("team_members")
-    .select("id, team_id, role, teams(id, name, status, sheet_locked, description)")
-    .eq("user_id", ctx.userId);
+  // Upcoming published/locked events (RLS already scopes visibility; drafts
+  // and templates are admin-only by policy).
+  const { data: events } = await supabase
+    .from("events")
+    .select("id, title, event_date, massing_time, timezone, location, set_name, status")
+    .in("status", ["published", "locked"])
+    .order("event_date", { ascending: true, nullsFirst: false })
+    .limit(8);
 
-  const teams: TeamCard[] = [];
-  for (const m of memberships ?? []) {
-    const t = Array.isArray(m.teams) ? m.teams[0] : m.teams;
-    if (!t || typeof t === "string") continue;
-    const { count } = await supabase
-      .from("team_members")
-      .select("id", { count: "exact", head: true })
-      .eq("team_id", (t as { id: string }).id);
-    teams.push({
-      id: (t as { id: string }).id,
-      name: (t as { name: string }).name,
-      status: (t as { status: string }).status,
-      sheet_locked: (t as { sheet_locked: boolean }).sheet_locked,
-      description: (t as { description: string | null }).description ?? null,
-      member_count: count ?? 0,
-      my_role: m.role,
-    });
+  // One aggregate query for fill counters (no N+1).
+  const eventIds = (events ?? []).map((e) => e.id);
+  const fillCounts: Record<string, { filled: number; total: number }> = {};
+  if (eventIds.length > 0) {
+    const { data: agg } = await supabase
+      .from("event_slots")
+      .select("id, event_signups(id), event_parties!inner(event_id)")
+      .in("event_parties.event_id", eventIds);
+    for (const e of events ?? []) fillCounts[e.id] = { filled: 0, total: 0 };
+    for (const row of (agg ?? []) as unknown as Array<{
+      event_parties: { event_id: string } | { event_id: string }[];
+      event_signups: unknown[];
+    }>) {
+      const ep = Array.isArray(row.event_parties) ? row.event_parties[0] : row.event_parties;
+      const bucket = ep ? fillCounts[ep.event_id] : undefined;
+      if (!bucket) continue;
+      bucket.total += 1;
+      if (Array.isArray(row.event_signups) && row.event_signups.length > 0) bucket.filled += 1;
+    }
   }
 
-  const recentActivity = await fetchMemberActivity(supabase, 8);
-  const openTeams = teams.filter((t) => t.status === "open").length;
+  // My signups in those events.
+  const { data: mySignups } = eventIds.length > 0
+    ? await supabase
+        .from("event_signups")
+        .select("event_id")
+        .eq("user_id", ctx.userId)
+        .in("event_id", eventIds)
+    : { data: [] as { event_id: string }[] | null };
+  const myEventIds = new Set((mySignups ?? []).map((s) => s.event_id));
+
+  const { count: unreadCount } = await supabase
+    .from("notifications")
+    .select("id", { count: "exact", head: true })
+    .eq("user_id", ctx.userId)
+    .eq("read", false);
 
   return (
     <div className="mx-auto max-w-6xl space-y-6">
       <div>
-        <h1 className="font-display text-2xl font-bold tracking-tight">
-          Welcome back, {ctx.profile?.ign}
-        </h1>
-        <p className="mt-1 flex items-center gap-2 text-sm text-muted">
-          Account: <Badge status={ctx.profile?.status ?? "approved"} />
-          {ctx.isPlatformAdmin ? <span className="badge badge-admin">admin</span> : null}
-        </p>
+        <h1 className="font-display text-2xl font-bold tracking-tight">Welcome back, {ctx.profile?.ign ?? "player"}</h1>
+        <p className="mt-1 text-sm text-muted">Upcoming masses and your signups.</p>
       </div>
 
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-        <StatCard label="Your teams" value={teams.length} />
-        <StatCard label="Open sheets" value={openTeams} tone="success" />
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <StatCard label="Upcoming events" value={events?.length ?? 0} />
         <StatCard
-          label="Pending actions"
-          value={openTeams > 0 ? "Fill sheet" : "None"}
+          label="My signups"
+          value={[...(events ?? [])].filter((e) => myEventIds.has(e.id)).length}
+          tone="success"
         />
+        <StatCard label="Unread notifications" value={unreadCount ?? 0} tone={(unreadCount ?? 0) > 0 ? "warn" : "default"} href="/notifications" />
+        <StatCard label="Profile" value={ctx.profile?.ign ?? "—"} hint="View or edit your IGN" href="/profile" />
       </div>
 
-      <section>
-        <div className="mb-3 flex items-center justify-between">
-          <h2 className="section-title">Your teams</h2>
-          <Link href="/teams" className="link-brand text-sm">All teams <ChevronRight className="inline" size={14} /></Link>
+      <section className="space-y-3">
+        <div className="flex items-center justify-between">
+          <h2 className="section-title">Upcoming events</h2>
+          <Link href="/events" className="link-brand text-sm">All events <ChevronRight className="inline" size={14} /></Link>
         </div>
 
-        {teams.length === 0 ? (
+        {!events || events.length === 0 ? (
           <EmptyState
-            icon={<ClipboardList size={36} />}
-            title="You haven't been assigned to a team yet"
-            description="When an administrator adds you to a team, it will appear here and you'll get a notification."
+            icon={<CalendarDays size={36} />}
+            title="No upcoming events"
+            description="When an admin publishes a mass, it appears here and you get a notification."
           />
         ) : (
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {teams.map((team) => (
-              <Link
-                key={team.id}
-                href={`/teams/${team.id}`}
-                className="panel panel-hover block p-5 transition-colors"
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <h3 className="font-display text-base font-semibold">{team.name}</h3>
-                  <Badge status={team.status} />
-                </div>
-                <p className="mt-1 line-clamp-1 text-xs text-faint">{team.description || "No description"}</p>
-                <div className="mt-4 flex items-center justify-between text-sm">
-                  <span className="text-muted">{team.member_count} members</span>
-                  <span className="badge badge-role">{team.my_role}</span>
-                </div>
-                <div className="mt-3">
-                  {team.sheet_locked ? (
-                    <span className="text-xs font-semibold text-danger">🔒 Sheet locked — view only</span>
-                  ) : (
-                    <span className="text-xs font-semibold text-success">Sheet open — you can edit</span>
-                  )}
-                </div>
-              </Link>
-            ))}
+          <div className="grid gap-3 md:grid-cols-2">
+            {events.map((event) => {
+              const counts = fillCounts[event.id] ?? { filled: 0, total: 0 };
+              const mine = myEventIds.has(event.id);
+              return (
+                <Link key={event.id} href={`/events/${event.id}`} className="panel panel-hover block p-4 transition-colors">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <h3 className="truncate font-display text-base font-semibold">{event.title}</h3>
+                      <p className="mt-0.5 text-xs text-faint">
+                        {[event.location, event.set_name].filter(Boolean).join(" · ") || "Details inside"}
+                      </p>
+                    </div>
+                    <Badge status={event.status === "locked" ? "locked" : "approved"} />
+                  </div>
+                  <p className="mt-2 text-sm text-muted">
+                    {event.event_date ?? "Date TBA"}
+                    {event.massing_time ? ` · ${event.massing_time.slice(0, 5)} ${event.timezone}` : ""}
+                  </p>
+                  <div className="mt-3 flex items-center justify-between">
+                    <span className="text-sm font-semibold">{counts.filled} / {counts.total} slots filled</span>
+                    {mine
+                      ? <span className="badge badge-approved">You're signed up</span>
+                      : <span className="btn btn-primary btn-sm">View & Sign Up</span>}
+                  </div>
+                </Link>
+              );
+            })}
           </div>
         )}
       </section>
 
-      <section className="grid gap-6 lg:grid-cols-2">
-        <div className="panel p-5">
-          <div className="mb-3 flex items-center justify-between">
-            <h2 className="section-title">Recent activity</h2>
-            <History size={15} className="text-faint" />
-          </div>
-          {recentActivity.length === 0 ? (
-            <p className="py-6 text-center text-sm text-muted">No activity yet.</p>
-          ) : (
-            <ul className="divide-y divide-line">
-              {recentActivity.map((a) => (
-                <li key={a.id} className="flex items-center justify-between gap-3 py-2.5 text-sm">
-                  <span className="min-w-0 truncate text-ink">{describeActivity(a.action, a.meta ?? {})}</span>
-                  <span className="shrink-0 text-xs text-faint">{timeAgo(a.created_at)}</span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-
-        <div className="panel p-5">
-          <div className="mb-3 flex items-center justify-between">
-            <h2 className="section-title">Notifications</h2>
-            <Bell size={15} className="text-faint" />
-          </div>
-          <p className="py-6 text-center text-sm text-muted">
-            Your latest notifications appear in the bell menu.
-          </p>
-          <Link href="/notifications" className="btn btn-secondary btn-sm w-full">
-            Open notifications
+      <section className="space-y-3">
+        <h2 className="section-title">Quick actions</h2>
+        <div className="grid gap-3 sm:grid-cols-3">
+          <Link href="/events" className="panel panel-hover flex items-center gap-3 p-4 transition-colors">
+            <Swords size={20} className="text-brand" />
+            <span className="text-sm font-medium">Browse all events</span>
+          </Link>
+          <Link href="/notifications" className="panel panel-hover flex items-center gap-3 p-4 transition-colors">
+            <CalendarDays size={20} className="text-brand" />
+            <span className="text-sm font-medium">Notifications</span>
+          </Link>
+          <Link href="/profile" className="panel panel-hover flex items-center gap-3 p-4 transition-colors">
+            <span className="badge badge-role">IGN</span>
+            <span className="text-sm font-medium">Profile settings</span>
           </Link>
         </div>
       </section>
     </div>
   );
-}
-
-function describeActivity(action: string, meta: Record<string, unknown>): string {
-  switch (action) {
-    case "USER_LOGIN": return "Signed in";
-    case "USER_REGISTERED": return "Registered an account";
-    case "USER_APPROVED": return "Account approved";
-    case "USER_SUSPENDED": return "Account suspended";
-    case "FIELD_UPDATED":
-      return `Updated ${String(meta.field ?? "field")}${
-        meta.previous ? `: ${String(meta.previous)} → ${String(meta.new)}` : ""
-      }`;
-    case "MEMBER_ADDED": return `Added to ${String(meta.team_name ?? "a team")}`;
-    case "MEMBER_REMOVED": return `Removed from ${String(meta.team_name ?? "a team")}`;
-    case "CHANGE_REVERTED": return `Reverted ${String(meta.field ?? "a field")}`;
-    default: return action.replaceAll("_", " ").toLowerCase();
-  }
 }

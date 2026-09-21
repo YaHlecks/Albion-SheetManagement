@@ -23,14 +23,14 @@ export default async function NotificationsPage() {
     <div className="mx-auto max-w-3xl space-y-5">
       <div>
         <h1 className="font-display text-2xl font-bold tracking-tight">Notifications</h1>
-        <p className="mt-1 text-sm text-muted">Approvals, team changes and moderation updates.</p>
+        <p className="mt-1 text-sm text-muted">Event announcements and account updates.</p>
       </div>
 
       {notifications.length === 0 ? (
         <EmptyState
           icon={<Bell size={36} />}
           title="No notifications"
-          description="You're all caught up. Notifications about your account and teams will appear here."
+          description="You're all caught up. Notifications about events and your account will appear here."
         />
       ) : (
         <NotificationsList initial={notifications} />

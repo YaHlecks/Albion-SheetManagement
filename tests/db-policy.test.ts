@@ -3,256 +3,217 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 /**
- * Static consistency checks over the SQL migration. These guard the
- * security-critical invariants whose violation caused the 42P17 recursion
- * and the 42501 permission errors, so a future edit cannot silently
- * reintroduce them. (Full behavioral RLS testing requires a live Postgres —
- * see README "Testing".)
+ * Static consistency checks over the authoritative schema (0001_init.sql).
+ * These guard the security-critical invariants whose violation previously
+ * caused 42P17 recursion and 42501 permission errors — a future edit cannot
+ * silently reintroduce them.
  */
 const sql = readFileSync(join(process.cwd(), "supabase", "migrations", "0001_init.sql"), "utf8");
-const bootstrap = readFileSync(join(process.cwd(), "supabase", "bootstrap-admin.sql"), "utf8");
 
-const tables = ["profiles", "teams", "team_members", "notifications", "audit_logs"];
+const TABLES = [
+  "profiles", "events", "event_parties", "event_slots", "event_signups",
+  "albion_equipment", "notifications", "audit_logs",
+];
 
-function policyBlock(table: string): string {
-  // From the table's RLS section to the next table marker (or end).
-  const start = sql.indexOf(`-- ---------- ${table} ----------`);
-  const nextMarker = sql.slice(start + 1).indexOf("\n-- ---------- ");
-  return start === -1
-    ? ""
-    : sql.slice(start, nextMarker === -1 ? undefined : start + 1 + nextMarker);
-}
+describe("schema — tables & constraints", () => {
+  it("creates all eight event-architecture tables", () => {
+    for (const t of TABLES) {
+      expect(sql).toMatch(new RegExp(`create table if not exists public\\.${t}`));
+    }
+  });
 
-describe("RLS architecture (42P17 / 42501 regression guards)", () => {
+  it("chains events → parties → slots → signups with cascading FKs", () => {
+    expect(sql).toMatch(/event_parties\s*\([\s\S]*?event_id uuid not null references public\.events\(id\) on delete cascade/);
+    expect(sql).toMatch(/event_slots\s*\([\s\S]*?party_id uuid not null references public\.event_parties\(id\) on delete cascade/);
+    expect(sql).toMatch(/event_signups\s*\([\s\S]*?slot_id uuid not null unique references public\.event_slots\(id\)/);
+    expect(sql).toMatch(/event_signups\s*\([\s\S]*?event_id uuid not null references public\.events\(id\)/);
+  });
+
+  it("enforces one-signup-per-slot AND one-signup-per-member-per-event", () => {
+    expect(sql).toMatch(/slot_id uuid not null unique/);
+    expect(sql).toMatch(/unique \(event_id, user_id\)/);
+  });
+
+  it("uses the smallest sensible event lifecycle (§7)", () => {
+    expect(sql).toMatch(/status in \('draft','published','locked','completed','cancelled','archived'\)/);
+  });
+
+  it("supports templates (§15)", () => {
+    expect(sql).toMatch(/is_template boolean not null default false/);
+  });
+});
+
+describe("schema — no Team architecture remains (§46)", () => {
+  it("contains zero team tables, functions, or policies", () => {
+    expect(sql).not.toMatch(/create table if not exists public\.teams?\b/);
+    expect(sql).not.toMatch(/create table if not exists public\.team_members/);
+    expect(sql).not.toMatch(/team_members\b/);
+    expect(sql).not.toMatch(/create or replace function public\.admin_action\b/);
+    expect(sql).not.toMatch(/claim_mass_slot|save_mass_sheet|mass_sheets|mass_parties/);
+  });
+});
+
+describe("RLS — enabled, scoped, recursion-safe (§33/§39)", () => {
   it("enables RLS on every table", () => {
-    for (const t of tables) {
-      expect(sql).toMatch(new RegExp(`alter table public\\.${t} enable row level security`));
+    for (const t of TABLES) {
+      expect(sql).toMatch(new RegExp(`alter table public\\.${t}\\s+enable row level security`));
     }
   });
 
-  it("defines the definer helper functions used by policies", () => {
+  it("never uses USING (true) / WITH CHECK (true)", () => {
+    expect(sql).not.toMatch(/USING \(true\)/i);
+    expect(sql).not.toMatch(/WITH CHECK \(true\)/i);
+  });
+
+  it("visibility cascades through security-definer helpers (42P17-safe)", () => {
+    expect(sql).toMatch(/function public\.is_event_visible[\s\S]*?security definer/);
+    expect(sql).toMatch(/create policy "events: visible read"[\s\S]*?using \(public\.is_event_visible\(id\)\)/);
+    expect(sql).toMatch(/create policy "event_slots: visible read"[\s\S]*?using \(public\.is_event_slot_visible\(id\)\)/);
+    expect(sql).toMatch(/create policy "event_signups: visible read"[\s\S]*?using \(public\.is_event_slot_visible\(slot_id\)\)/);
+  });
+
+  it("members write only their own signups, on published events only", () => {
+    expect(sql).toMatch(/create policy "event_signups: own row on published"[\s\S]*?user_id = auth\.uid\(\)[\s\S]*?e\.status = 'published'/);
+  });
+
+  it("drafts and templates are admin-only", () => {
+    expect(sql).toMatch(/is_event_visible[\s\S]*?e\.status in \('published','locked','completed'\)/);
+  });
+
+  it("notifications: members read + mark-read own; admins insert", () => {
+    expect(sql).toMatch(/create policy "notifications: own read"[\s\S]*?using \(user_id = auth\.uid\(\)\)/);
+    expect(sql).toMatch(/create policy "notifications: admin insert"[\s\S]*?with check \(public\.is_event_admin\(\)\)/);
+  });
+
+  it("audit_logs is append-only and admin-readable", () => {
+    expect(sql).toMatch(/create policy "audit_logs: admin read"[\s\S]*?using \(public\.is_event_admin\(\)\)/);
+    expect(sql).toMatch(/create policy "audit_logs: admin insert"[\s\S]*?with check \(public\.is_event_admin\(\)\)/);
+  });
+
+  it("no policy self-references its own table (recursion guard)", () => {
+    const policies = sql.split(/create policy /).slice(1);
+    for (const p of policies) {
+      const name = p.match(/"([^"]+)"/)?.[1] ?? "?";
+      const body = p.slice(p.indexOf("using"));
+      for (const t of TABLES) {
+        if (name.includes(t)) {
+          expect(body, `policy "${name}" must not read public.${t}`).not.toContain(`from public.${t}`);
+        }
+      }
+    }
+  });
+});
+
+describe("grants — authenticated SELECT-only, anon zero (§33)", () => {
+  it("revokes everything from anon", () => {
+    expect(sql.match(/revoke all on public\.\w+\s+from anon;/g)?.length).toBeGreaterThanOrEqual(8);
+  });
+
+  it("grants authenticated SELECT on all tables and nothing else", () => {
+    expect(sql).toMatch(/grant select on public\.profiles, public\.events, public\.event_parties,\s*\n\s*public\.event_slots, public\.event_signups, public\.albion_equipment,\s*\n\s*public\.notifications, public\.audit_logs\s*\n\s*to authenticated/);
+    expect(sql).toMatch(/revoke insert, update, delete, truncate, references, trigger[\s\S]*?from authenticated/);
+  });
+
+  it("service_role keeps full access (server-only)", () => {
+    expect(sql).toMatch(/grant select, insert, update, delete, truncate[\s\S]*?to service_role/);
+  });
+
+  it("grants EXECUTE on every RPC to authenticated", () => {
     for (const fn of [
-      "create or replace function public.is_platform_admin()",
-      "create or replace function public.is_team_member(p_team_id uuid)",
-      "create or replace function public.is_team_editable(p_team_id uuid)",
-      "create or replace function public.shares_team_with_me(p_other_user uuid)",
+      "claim_event_slot\\(uuid, text\\)",
+      "leave_event_slot\\(uuid\\)",
+      "save_event\\(uuid, jsonb\\)",
+      "set_event_status\\(uuid, text\\)",
+      "duplicate_event\\(uuid\\)",
+      "admin_set_signup\\(uuid, uuid\\)",
+      "admin_user_action\\(text, uuid, jsonb\\)",
+      "update_own_profile\\(text, text\\)",
     ]) {
-      expect(sql).toContain(fn);
-    }
-  });
-
-  it("helpers are security definer (evaluate as owner → no policy recursion)", () => {
-    const helpers = ["is_platform_admin", "is_team_member", "is_team_editable", "shares_team_with_me"];
-    for (const h of helpers) {
-      const idx = sql.indexOf(`function public.${h}(`);
-      const body = sql.slice(idx, idx + 400);
-      expect(body, `${h} must be security definer`).toContain("security definer");
-    }
-  });
-
-  it("no policy queries its own table directly (the 42P17 root cause)", () => {
-    for (const t of tables) {
-      const block = policyBlock(t);
-      expect(block, `policy block for ${t} should exist`).not.toBe("");
-      // A direct `from public.<t>` or `update/delete on <t>` reference inside
-      // the same table's policy block is the recursion signature. Helpers
-      // (security definer) are the sanctioned replacement.
-      expect(block, `${t} policy must not select from itself`).not.toMatch(
-        new RegExp(`from\\s+public\\.${t}\\b`)
-      );
-    }
-  });
-
-  it("team_members select policy uses the definer helper, not a self-query", () => {
-    const block = policyBlock("team_members");
-    expect(block).toContain("create policy \"team_members: team members and admins read\"");
-    expect(block).toContain("public.is_team_member(team_id)");
-  });
-
-  it("teams select policy delegates membership to the helper", () => {
-    const block = policyBlock("teams");
-    expect(block).toContain("public.is_team_member(id)");
-  });
-
-  it("profiles are not world-readable: anon has no grants, visibility is scoped", () => {
-    const grants = sql.slice(sql.indexOf("-- GRANTS: tighten default privileges"));
-    expect(grants).toMatch(/revoke all on public\.profiles from anon/);
-    expect(grants).not.toMatch(/grant select on public\.profiles to anon/);
-    const block = policyBlock("profiles");
-    expect(block).toContain("id = auth.uid()");
-    expect(block).toContain("public.shares_team_with_me(id)");
-  });
-
-  it("audit_logs are readable by admins only — no member reads", () => {
-    const block = policyBlock("audit_logs");
-    expect(block).toContain('create policy "audit_logs: admins read"');
-    expect(block).toContain("public.is_platform_admin()");
-    expect(block).not.toMatch(/target_user_id = auth\.uid\(\)/); // members must use the RPC
-  });
-
-  it("notifications are scoped to their owner", () => {
-    const block = policyBlock("notifications");
-    expect(block).toContain("user_id = auth.uid()");
-  });
-
-  it("insert/update/delete policies are separated per operation on team_members", () => {
-    const block = policyBlock("team_members");
-    expect(block).toMatch(/for insert/i);
-    expect(block).toMatch(/for update/i);
-    expect(block).toMatch(/for delete/i);
-    expect(block).toMatch(/for select/i);
-  });
-
-  it("protected tables have no client insert/update/delete policies", () => {
-    expect(policyBlock("audit_logs")).not.toMatch(/for insert|for update|for delete/i);
-    expect(policyBlock("notifications")).not.toMatch(/for insert/i);
-  });
-});
-
-describe("Privileged RPC hardening", () => {
-  it("admin_action re-verifies admin inside the function and supports trusted-server attribution", () => {
-    expect(sql).toContain("p_actor_id uuid default null");
-    expect(sql).toMatch(/if not v_is_admin then\s*\n\s*return jsonb_build_object\('ok', false, 'error', 'FORBIDDEN'\)/);
-  });
-
-  it("log_audit rejects actions the database records automatically", () => {
-    const idx = sql.indexOf("function public.log_audit(");
-    const body = sql.slice(idx, sql.indexOf("$$;", idx));
-    expect(body).toContain("raise exception");
-    expect(body).toContain("'USER_LOGOUT'");
-  });
-
-  it("notify_user cannot be abused by regular members to spoof notifications", () => {
-    const idx = sql.indexOf("function public.notify_user(");
-    const body = sql.slice(idx, idx + 700);
-    expect(body).toContain("raise exception 'FORBIDDEN'");
-  });
-
-  it("ensure_profile never grants admin and derives identity from the JWT", () => {
-    const idx = sql.indexOf("function public.ensure_profile()");
-    const body = sql.slice(idx, sql.indexOf("$$;", idx));
-    expect(body).toContain("auth.uid() is null");
-    expect(body).toContain("'pending', false");
-  });
-
-  it("recent_own_activity scopes rows to the caller", () => {
-    const idx = sql.indexOf("function public.recent_own_activity(");
-    const body = sql.slice(idx, sql.indexOf("$$;", idx));
-    expect(body).toContain("a.actor_id = auth.uid() or a.target_user_id = auth.uid()");
-  });
-
-  it("touch_login only updates the caller's own row", () => {
-    const idx = sql.indexOf("function public.touch_login()");
-    const body = sql.slice(idx, sql.indexOf("$$;", idx));
-    expect(body).toContain("where id = auth.uid()");
-  });
-
-  it("field updates validate ownership, approval, lock and team status in-DB", () => {
-    const idx = sql.indexOf("function public.update_member_field(");
-    const body = sql.slice(idx, sql.indexOf("$$;", idx));
-    for (const marker of [
-      "ACCOUNT_NOT_APPROVED",
-      "FORBIDDEN",
-      "SHEET_LOCKED",
-      "TEAM_NOT_EDITABLE",
-      "INVALID_FIELD",
-      "INVALID_VALUE",
-    ]) {
-      expect(body).toContain(marker);
+      expect(sql).toMatch(new RegExp(`grant execute on function public\\.${fn}\\s+to authenticated`));
     }
   });
 });
 
-describe("Account lifecycle & bootstrap", () => {
-  it("first account becomes admin+approved inside the signup trigger (race-safe)", () => {
-    const idx = sql.indexOf("function public.handle_new_user()");
-    const body = sql.slice(idx, sql.indexOf("$$;", idx));
-    // Race-safety: serializes concurrent signups so two users cannot both
-    // observe an empty profiles table (TOCTOU).
-    expect(body).toContain("pg_advisory_xact_lock");
-    // The decision reads the protected table inside a security-definer
-    // function — never from client-supplied fields.
-    expect(body).toContain("not exists (select 1 from public.profiles)");
-    expect(body.match(/v_is_first_user/g)?.length ?? 0).toBeGreaterThanOrEqual(4); // compute + status + role + audit
-    // First user: approved admin; everyone else: pending member.
-    expect(body).toContain("'approved'");
-    expect(body).toContain("'pending'");
-    // Bootstrap is auditable.
-    expect(body).toContain("'PERMISSION_CHANGED'");
-    expect(body).toContain("bootstrapped_admin");
+describe("RPCs — signup concurrency and admin flows (§10/§34)", () => {
+  it("claim re-checks approval + published status in-database", () => {
+    expect(sql).toMatch(/function public\.claim_event_slot[\s\S]*?ACCOUNT_NOT_APPROVED/);
+    expect(sql).toMatch(/function public\.claim_event_slot[\s\S]*?EVENT_NOT_OPEN/);
+    expect(sql).toMatch(/function public\.claim_event_slot[\s\S]*?ALREADY_SIGNED_UP/);
   });
 
-  it("claim_first_admin self-heals the earliest pre-rule account — and only that case", () => {
-    const idx = sql.indexOf("function public.claim_first_admin()");
-    expect(idx).toBeGreaterThan(-1);
-    const body = sql.slice(idx, sql.indexOf("$$;", idx));
-    expect(body).toContain("auth.uid() is null");
-    // Race-safety + atomicity: same lock as the signup trigger.
-    expect(body).toContain("pg_advisory_xact_lock");
-    // Guards: only when no admin exists AND caller is the earliest profile.
-    expect(body).toContain("not exists (select 1 from public.profiles where is_platform_admin)");
-    expect(body).toContain("order by p.created_at asc, p.id asc");
-    expect(body).toContain("v_earliest = auth.uid()");
-    // Promotion is audited and reported.
-    expect(body).toContain("'PERMISSION_CHANGED'");
-    expect(body).toContain("'promoted', v_promoted");
-    // Executable by the two legitimate session contexts only.
-    expect(sql).toMatch(
-      /grant execute on function public\.claim_first_admin\(\) to authenticated, service_role/
-    );
+  it("claim uses the profile IGN — members never retype it (§11)", () => {
+    expect(sql).toMatch(/claim_event_slot[\s\S]*?p\.ign, v_note/);
   });
 
-  it("the recovery script promotes an existing registered account", () => {
-    expect(bootstrap).toContain("is_platform_admin = true");
-    expect(bootstrap).toContain("status = 'approved'");
-    expect(bootstrap).toMatch(/PERMISSION_CHANGED/);
-    expect(bootstrap).toContain("auth.users");
+  it("maps unique_violation races to SLOT_TAKEN / ALREADY_SIGNED_UP", () => {
+    expect(sql).toMatch(/claim_event_slot[\s\S]*?when unique_violation then[\s\S]*?SLOT_TAKEN/);
   });
 
-  it("profile updates cannot change status/admin flag without admin rights", () => {
-    const idx = sql.indexOf("function public.handle_profile_update()");
-    const body = sql.slice(idx, sql.indexOf("$$;", idx));
-    expect(body).toContain("Only administrators can change account status");
+  it("identity always comes from auth.uid(), never the client", () => {
+    const fn = sql.match(/function public\.claim_event_slot[\s\S]*?\$\$;/)![0];
+    expect(fn).not.toMatch(/p_user_id/);
   });
 
-  it("IGN uniqueness is enforced by the database", () => {
-    expect(sql).toContain("profiles_ign_unique_idx");
-    expect(sql).toContain("unique index");
+  it("publish notifies approved members (§17)", () => {
+    expect(sql).toMatch(/set_event_status[\s\S]*?insert into public\.notifications[\s\S]*?p\.status = 'approved'/);
+  });
+
+  it("duplicate copies structure, never signups, starts as draft (§15/§17)", () => {
+    const fn = sql.match(/function public\.duplicate_event[\s\S]*?\$\$;/)![0];
+    expect(fn).toMatch(/'draft', false, v_actor/);
+    expect(fn).not.toMatch(/event_signups/);
+  });
+
+  it("first account bootstraps admin+approved; later ones pending (§5)", () => {
+    expect(sql).toMatch(/case when v_count = 0 then 'approved' else 'pending' end,\s*\n\s*v_count = 0/);
+  });
+
+  it("profile creation de-duplicates IGN instead of crashing auth signup", () => {
+    expect(sql).toMatch(/handle_new_user[\s\S]*?v_ign \|\| '-' \|\| v_n/);
+  });
+
+  it("missing profile row can never silently succeed a signup", () => {
+    expect(sql).toMatch(/claim_event_slot[\s\S]*?PROFILE_NOT_FOUND/);
   });
 });
 
-describe("Audit trigger coverage", () => {
-  it("records every operation the platform promises to audit", () => {
-    const required = [
-      "USER_REGISTERED",
-      "USER_APPROVED",
-      "USER_REJECTED",
-      "USER_SUSPENDED",
-      "USER_REACTIVATED",
-      "USER_ARCHIVED",
-      "USER_LOGIN",
-      "USER_LOGOUT",
-      "TEAM_CREATED", // written by the API route via log_audit/admin insert
-      "TEAM_RENAMED",
-      "TEAM_ARCHIVED",
-      "MEMBER_ADDED",
-      "MEMBER_REMOVED",
-      "SHEET_LOCKED",
-      "SHEET_UNLOCKED",
-      "FIELD_UPDATED",
-      "CHANGE_REVERTED",
-      "PERMISSION_CHANGED",
-    ];
-    for (const action of required) {
-      expect(sql, `missing audit action ${action}`).toContain(`'${action}'`);
+describe("equipment catalog (§18–25)", () => {
+  it("is normalized with searchable indexes", () => {
+    expect(sql).toMatch(/create table if not exists public\.albion_equipment/);
+    expect(sql).toMatch(/albion_equipment_name_idx on public\.albion_equipment \(lower\(name\)\)/);
+    expect(sql).toMatch(/albion_equipment_family_idx/);
+  });
+
+  it("covers all weapon families, armor, helmets, shoes and off-hands", () => {
+    for (const family of ["Swords", "Axes", "Maces", "Hammers", "Spears", "Quarterstaffs",
+      "Daggers", "Bows", "Crossbows", "Fire Staffs", "Frost Staffs", "Arcane Staffs",
+      "Holy Staffs", "Nature Staffs", "Cursed Staffs", "War Gloves"]) {
+      expect(sql).toContain(`'${family}'`);
+    }
+    for (const item of ["Cryptcandle", "Mistcaller", "Taproot", "Facebreaker", "Leering Cane", "Shield", "Tome"]) {
+      expect(sql).toContain(`'${item}'`);
+    }
+    for (const cat of ["'Weapon'", "'Armor'", "'Helmet'", "'Shoes'", "'Off-Hand'"]) {
+      expect(sql).toContain(cat);
     }
   });
 
-  it("team and membership triggers exist for insert/update/delete paths", () => {
-    expect(sql).toMatch(/create trigger on_team_change/);
-    expect(sql).toMatch(/create trigger on_membership_insert/);
-    expect(sql).toMatch(/create trigger on_membership_delete/);
-    expect(sql).toMatch(/create trigger on_member_field_change/);
-    expect(sql).toMatch(/create trigger on_auth_user_created/);
+  it("tier_requirement is structured and CHECK-constrained", () => {
+    expect(sql).toMatch(/tier_requirement in \('any','T4','T4\.1','T5','T5\.1','T6','T6\.1','T7','T7\.1','T8','T8\.1'\)/);
+  });
+});
+
+describe("realtime + reset (§36/§37)", () => {
+  it("publishes signups and events for realtime", () => {
+    expect(sql).toMatch(/alter publication supabase_realtime add table public\.event_signups/);
+    expect(sql).toMatch(/alter publication supabase_realtime add table public\.events/);
+  });
+
+  it("reset script drops everything except auth.users and is idempotent", () => {
+    const reset = readFileSync(join(process.cwd(), "supabase", "reset.sql"), "utf8");
+    expect(reset).toMatch(/drop table if exists public\.events cascade/);
+    expect(reset).toMatch(/drop table if exists public\.teams cascade/);
+    expect(reset).not.toMatch(/drop table if exists auth\.users/);
+    expect(reset).toMatch(/auth\.users is INTENTIONALLY PRESERVED/);
   });
 });

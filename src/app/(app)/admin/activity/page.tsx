@@ -12,18 +12,15 @@ const PAGE_SIZE = 25;
 export default async function AdminActivityPage({
   searchParams,
 }: {
-  searchParams: Promise<{ q?: string; action?: string; team?: string; page?: string }>;
+  searchParams: Promise<{ q?: string; action?: string; page?: string }>;
 }) {
   await requireAdminPage();
   const sp = await searchParams;
   const q = (sp.q ?? "").trim();
   const action = sp.action ?? "";
-  const team = sp.team ?? "";
   const page = Math.max(0, parseInt(sp.page ?? "0", 10) || 0);
 
   const supabase = await createSupabaseServerClient();
-
-  const { data: teamRows } = await supabase.from("teams").select("id, name").order("name");
 
   // Resolve a search term to user ids (search by IGN) so "John" finds events
   // where John was the actor or the affected member.
@@ -44,14 +41,13 @@ export default async function AdminActivityPage({
   let query = supabase
     .from("audit_logs")
     .select(
-      "id, action, meta, created_at, actor_id, target_user_id, team_id, profiles:actor_id(ign), target:target_user_id(ign), teams(name)",
-      { count: "exact" }
+      "id, action, meta, created_at, actor_id, target_user_id, event_id, profiles:actor_id(ign), target:target_user_id(ign)",
+      { count: "exact" },
     )
     .order("created_at", { ascending: false })
     .range(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE - 1);
 
   if (action) query = query.eq("action", action);
-  if (team) query = query.eq("team_id", team);
   if (userIds) {
     const list = userIds.join(",");
     query = query.or(`actor_id.in.(${list}),target_user_id.in.(${list})`);
@@ -68,27 +64,19 @@ export default async function AdminActivityPage({
     target_user_id: string | null;
     profiles: { ign: string } | { ign: string }[] | null;
     target: { ign: string } | { ign: string }[] | null;
-    teams: { name: string } | { name: string }[] | null;
   }>;
 
   return (
     <div className="mx-auto max-w-5xl space-y-5">
       <div>
         <h1 className="font-display text-2xl font-bold tracking-tight">Activity</h1>
-        <p className="mt-1 text-sm text-muted">Every recorded event with full change details.</p>
+        <p className="mt-1 text-sm text-muted">Every recorded action with full change details.</p>
       </div>
 
       {events.length === 0 ? (
         <ActivityEmpty />
       ) : (
-        <ActivityViewer
-          events={events}
-          total={count ?? 0}
-          page={page}
-          pageSize={PAGE_SIZE}
-          filters={{ q, action, team }}
-          teams={(teamRows ?? []).map((t) => ({ id: t.id, name: t.name }))}
-        />
+        <ActivityViewer events={events} total={count ?? 0} page={page} pageSize={PAGE_SIZE} filters={{ q, action }} />
       )}
     </div>
   );
@@ -99,7 +87,7 @@ function ActivityEmpty() {
     <EmptyState
       icon={<History size={36} />}
       title="No activity found"
-      description="No events match the current filters. Try widening your search."
+      description="No entries match the current filters. Try widening your search."
     />
   );
 }

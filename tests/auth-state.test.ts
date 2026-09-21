@@ -85,10 +85,10 @@ describe("resolveCallbackOutcome (verification vs recovery separation)", () => {
   });
 
   it("custom safe next is honored for both flows", () => {
-    expect(resolveCallbackOutcome({ ...base, code: "abc", next: "/teams" })).toEqual({
+    expect(resolveCallbackOutcome({ ...base, code: "abc", next: "/events" })).toEqual({
       kind: "success",
       type: "verification",
-      next: "/teams",
+      next: "/events",
     });
     expect(resolveCallbackOutcome({ ...base, code: "abc", type: "recovery", next: "/reset-password" })).toEqual({
       kind: "success",

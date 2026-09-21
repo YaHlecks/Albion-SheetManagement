@@ -48,20 +48,6 @@ export const profileUpdateSchema = z.object({
     .or(z.literal("")),
 });
 
-export const teamSchema = z.object({
-  name: z
-    .string()
-    .trim()
-    .min(2, "Team name must be at least 2 characters.")
-    .max(60, "Team name must be at most 60 characters."),
-  description: z
-    .string()
-    .trim()
-    .max(500, "Description must be at most 500 characters.")
-    .optional()
-    .or(z.literal("")),
-});
-
 export const resetSchema = z
   .object({
     password: z
@@ -80,7 +66,6 @@ export const resetSchema = z
 export type LoginInput = z.infer<typeof loginSchema>;
 export type RegisterInput = z.infer<typeof registerSchema>;
 export type ProfileUpdateInput = z.infer<typeof profileUpdateSchema>;
-export type TeamInput = z.infer<typeof teamSchema>;
 export type ResetInput = z.infer<typeof resetSchema>;
 
 export function fieldErrors(result: { success: boolean; error?: z.ZodError }): Record<string, string> {

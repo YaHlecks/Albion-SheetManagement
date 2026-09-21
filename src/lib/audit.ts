@@ -10,64 +10,59 @@ export type AuditAction =
   | "USER_ARCHIVED"
   | "USER_LOGIN"
   | "USER_LOGOUT"
-  | "TEAM_CREATED"
-  | "TEAM_RENAMED"
-  | "TEAM_ARCHIVED"
-  | "TEAM_RESTORED"
-  | "TEAM_STATUS_CHANGED"
-  | "TEAM_OPENED"
-  | "MEMBER_ADDED"
-  | "MEMBER_REMOVED"
-  | "SHEET_LOCKED"
-  | "SHEET_UNLOCKED"
-  | "FIELD_UPDATED"
-  | "CHANGE_REVERTED"
+  | "EVENT_CREATED"
+  | "EVENT_UPDATED"
+  | "EVENT_PUBLISHED"
+  | "EVENT_LOCKED"
+  | "EVENT_COMPLETED"
+  | "EVENT_CANCELLED"
+  | "EVENT_ARCHIVED"
+  | "EVENT_RESTORED"
+  | "EVENT_DUPLICATED"
+  | "SIGNUP_CREATED"
+  | "SIGNUP_REMOVED"
+  | "SIGNUP_MOVED"
   | "PERMISSION_CHANGED";
 
 export interface AuditEvent {
   action: AuditAction;
   actorId: string | null;
   targetUserId?: string | null;
-  teamId?: string | null;
+  eventId?: string | null;
   meta?: Record<string, unknown>;
 }
 
 /**
- * Actions that the database triggers already record when they fire. When an
- * admin action goes through the admin_action RPC the DB writes these events
- * itself, so the API route must NOT write them again (would duplicate).
+ * Actions the database RPCs already record when they fire — the API route
+ * must NOT write these again (would duplicate).
  */
-export const TRIGGER_RECORDED_ACTIONS = new Set<string>([
+export const RPC_RECORDED_ACTIONS = new Set<string>([
   "USER_APPROVED",
   "USER_REJECTED",
   "USER_SUSPENDED",
   "USER_REACTIVATED",
   "USER_ARCHIVED",
-  "TEAM_RENAMED",
-  "TEAM_ARCHIVED",
-  "TEAM_OPENED",
-  "MEMBER_ADDED",
-  "MEMBER_REMOVED",
-  "SHEET_LOCKED",
-  "SHEET_UNLOCKED",
-  "FIELD_UPDATED",
+  "EVENT_CREATED",
+  "EVENT_UPDATED",
+  "EVENT_PUBLISHED",
+  "EVENT_LOCKED",
+  "EVENT_COMPLETED",
+  "EVENT_CANCELLED",
+  "EVENT_ARCHIVED",
+  "EVENT_RESTORED",
+  "EVENT_DUPLICATED",
+  "SIGNUP_CREATED",
+  "SIGNUP_REMOVED",
+  "SIGNUP_MOVED",
+  "PERMISSION_CHANGED",
 ]);
-
-let cachedUserClient: Awaited<ReturnType<typeof createSupabaseServerClient>> | null = null;
-
-async function getUserClient() {
-  if (!cachedUserClient) {
-    cachedUserClient = await createSupabaseServerClient();
-  }
-  return cachedUserClient;
-}
 
 /**
  * Writes an audit event. Audit writes are append-only and must never
  * interrupt the main operation, so failures are logged and swallowed.
  *
- * Service-role inserts bypass RLS; otherwise the security-definer log_audit
- * RPC is used, which stamps the caller as actor.
+ * Service-role inserts bypass RLS; otherwise the caller's own session writes
+ * (audit_logs insert policy = admin-only, matching the callers of this lib).
  */
 export async function writeAudit(event: AuditEvent): Promise<void> {
   try {
@@ -77,22 +72,22 @@ export async function writeAudit(event: AuditEvent): Promise<void> {
         action: event.action,
         actor_id: event.actorId,
         target_user_id: event.targetUserId ?? null,
-        team_id: event.teamId ?? null,
+        event_id: event.eventId ?? null,
         meta: event.meta ?? {},
       });
       if (error) throw error;
     } else {
-      const supabase = await getUserClient();
-      const { error } = await supabase.rpc("log_audit", {
-        p_action: event.action,
-        p_target_user_id: event.targetUserId ?? null,
-        p_team_id: event.teamId ?? null,
-        p_meta: event.meta ?? {},
+      const supabase = await createSupabaseServerClient();
+      const { error } = await supabase.from("audit_logs").insert({
+        action: event.action,
+        actor_id: event.actorId,
+        target_user_id: event.targetUserId ?? null,
+        event_id: event.eventId ?? null,
+        meta: event.meta ?? {},
       });
       if (error) throw error;
     }
   } catch (err) {
-    // Never let audit failures break the user-facing operation.
-    console.error("[audit] failed to write audit event", event.action, err);
+    console.error("[audit] write failed (non-fatal)", event.action, err);
   }
 }

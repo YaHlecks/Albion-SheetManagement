@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { requirePageSession } from "@/lib/api";
 import { createSupabaseServerClient } from "@/lib/supabase-server";
 import { ProfileForm } from "@/components/profile-form";
@@ -12,18 +13,13 @@ export default async function ProfilePage() {
   const ctx = await requirePageSession();
   const supabase = await createSupabaseServerClient();
 
-  const { data: memberships } = await supabase
-    .from("team_members")
-    .select("id, role, teams(id, name, status)")
-    .eq("user_id", ctx.userId);
-
-  const teams = (memberships ?? [])
-    .map((m) => {
-      const t = Array.isArray(m.teams) ? m.teams[0] : m.teams;
-      if (!t || typeof t === "string") return null;
-      return { id: (t as { id: string }).id, name: (t as { name: string }).name, status: (t as { status: string }).status, role: m.role };
-    })
-    .filter((t): t is NonNullable<typeof t> => t !== null);
+  // My event signups (recent first).
+  const { data: mySignups } = await supabase
+    .from("event_signups")
+    .select("id, signed_up_at, events ( id, title, status, event_date )")
+    .eq("user_id", ctx.userId)
+    .order("signed_up_at", { ascending: false })
+    .limit(10);
 
   return (
     <div className="mx-auto max-w-3xl space-y-6">
@@ -66,20 +62,25 @@ export default async function ProfilePage() {
       <PasswordChangeForm />
 
       <div className="panel p-5">
-        <h2 className="section-title mb-4">Your teams</h2>
-        {teams.length === 0 ? (
-          <p className="py-4 text-center text-sm text-muted">You are not assigned to any team.</p>
+        <h2 className="section-title mb-4">My event signups</h2>
+        {(mySignups ?? []).length === 0 ? (
+          <p className="py-4 text-center text-sm text-muted">You haven't signed up to any events yet.</p>
         ) : (
           <ul className="divide-y divide-line">
-            {teams.map((t) => (
-              <li key={t.id} className="flex items-center justify-between py-2.5 text-sm">
-                <span className="font-semibold text-ink">{t.name}</span>
-                <span className="flex items-center gap-2">
-                  <span className="badge badge-role">{t.role}</span>
-                  <span className="badge badge-neutral">{t.status}</span>
-                </span>
-              </li>
-            ))}
+            {(mySignups ?? []).map((s) => {
+              const e = Array.isArray(s.events) ? s.events[0] : s.events;
+              if (!e || typeof e !== "object") return null;
+              const ev = e as { id: string; title: string; status: string; event_date: string | null };
+              return (
+                <li key={s.id} className="flex items-center justify-between py-2.5 text-sm">
+                  <Link href={`/events/${ev.id}`} className="font-semibold text-ink hover:text-brand">{ev.title}</Link>
+                  <span className="flex items-center gap-2">
+                    <span className="text-xs text-faint">{ev.event_date ?? "TBA"}</span>
+                    <Badge status={ev.status === "published" ? "approved" : ev.status === "locked" ? "locked" : "archived"} />
+                  </span>
+                </li>
+              );
+            })}
           </ul>
         )}
       </div>

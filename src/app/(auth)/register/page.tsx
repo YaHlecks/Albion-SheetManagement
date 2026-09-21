@@ -129,7 +129,7 @@ export default function RegisterPage() {
   return (
     <div className="auth-card">
       <h1 className="font-display text-2xl font-bold tracking-tight">Create your account</h1>
-      <p className="mt-1 text-sm text-muted">Register to join your guild&apos;s team sheets.</p>
+      <p className="mt-1 text-sm text-muted">Register to join your guild&apos;s masses.</p>
 
       {banner ? (
         <div className="form-banner form-banner-error mt-5" role="alert">{banner}</div>

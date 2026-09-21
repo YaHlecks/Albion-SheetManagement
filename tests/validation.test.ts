@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { loginSchema, registerSchema, profileUpdateSchema, teamSchema, resetSchema } from "@/lib/validation";
+import { loginSchema, registerSchema, profileUpdateSchema, resetSchema } from "@/lib/validation";
 
 describe("loginSchema", () => {
   it("accepts valid credentials shape", () => {
@@ -56,15 +56,6 @@ describe("profileUpdateSchema", () => {
   });
   it("rejects empty IGN", () => {
     expect(profileUpdateSchema.safeParse({ ign: "", discord: "" }).success).toBe(false);
-  });
-});
-
-describe("teamSchema", () => {
-  it("accepts valid team name", () => {
-    expect(teamSchema.safeParse({ name: "Team Alpha", description: "" }).success).toBe(true);
-  });
-  it("rejects too-long name", () => {
-    expect(teamSchema.safeParse({ name: "x".repeat(61), description: "" }).success).toBe(false);
   });
 });
 

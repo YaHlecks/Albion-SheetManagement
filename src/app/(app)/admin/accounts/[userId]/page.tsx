@@ -28,25 +28,20 @@ export default async function AdminAccountDetailPage({
 
   if (!account) notFound();
 
-  const { data: memberships } = await supabase
-    .from("team_members")
-    .select("id, role, joined_at, teams(id, name, status)")
-    .eq("user_id", userId);
+  // This member's event signups + their recent audit trail.
+  const { data: signups } = await supabase
+    .from("event_signups")
+    .select("id, signed_up_at, ign, events ( id, title, status, event_date )")
+    .eq("user_id", userId)
+    .order("signed_up_at", { ascending: false })
+    .limit(10);
 
   const { data: activity } = await supabase
     .from("audit_logs")
-    .select("id, action, meta, created_at, teams(name)")
+    .select("id, action, meta, created_at")
     .eq("actor_id", userId)
     .order("created_at", { ascending: false })
     .limit(10);
-
-  const teams = (memberships ?? [])
-    .map((m) => {
-      const t = Array.isArray(m.teams) ? m.teams[0] : m.teams;
-      if (!t || typeof t === "string") return null;
-      return { membershipId: m.id, role: m.role, joinedAt: m.joined_at, id: (t as { id: string }).id, name: (t as { name: string }).name, status: (t as { status: string }).status };
-    })
-    .filter((t): t is NonNullable<typeof t> => t !== null);
 
   return (
     <div className="mx-auto max-w-4xl space-y-5">
@@ -88,20 +83,28 @@ export default async function AdminAccountDetailPage({
       </section>
 
       <section className="panel p-5">
-        <h2 className="section-title mb-4">Team memberships</h2>
-        {teams.length === 0 ? (
-          <p className="py-4 text-center text-sm text-muted">Not assigned to any team.</p>
+        <h2 className="section-title mb-4">Event signups</h2>
+        {(signups ?? []).length === 0 ? (
+          <p className="py-4 text-center text-sm text-muted">No event signups.</p>
         ) : (
           <ul className="divide-y divide-line">
-            {teams.map((t) => (
-              <li key={t.membershipId} className="flex items-center justify-between py-2.5 text-sm">
-                <Link href={`/admin/teams/${t.id}`} className="font-semibold text-brand hover:underline">{t.name}</Link>
-                <span className="flex items-center gap-2">
-                  <span className="badge badge-role">{t.role}</span>
-                  <Badge status={t.status} />
-                </span>
-              </li>
-            ))}
+            {(signups ?? []).map((s) => {
+              const e = Array.isArray(s.events) ? s.events[0] : s.events;
+              const ev = e && typeof e === "object" ? (e as { id: string; title: string; status: string; event_date: string | null }) : null;
+              return (
+                <li key={s.id} className="flex items-center justify-between py-2.5 text-sm">
+                  {ev ? (
+                    <Link href={`/admin/events/${ev.id}`} className="font-semibold text-brand hover:underline">{ev.title}</Link>
+                  ) : (
+                    <span className="text-muted">(deleted event)</span>
+                  )}
+                  <span className="flex items-center gap-2">
+                    <span className="text-xs text-faint">{s.signed_up_at ? timeAgo(s.signed_up_at) : ""}</span>
+                    {ev ? <Badge status={ev.status === "published" ? "approved" : ev.status === "locked" ? "locked" : "archived"} /> : null}
+                  </span>
+                </li>
+              );
+            })}
           </ul>
         )}
       </section>
@@ -112,18 +115,12 @@ export default async function AdminAccountDetailPage({
           <p className="py-4 text-center text-sm text-muted">No recorded activity.</p>
         ) : (
           <ul className="divide-y divide-line">
-            {activity.map((a) => {
-              const team = Array.isArray(a.teams) ? a.teams[0] : a.teams;
-              return (
-                <li key={a.id} className="flex items-center justify-between gap-3 py-2.5 text-sm">
-                  <span className="min-w-0 truncate">
-                    {describeUserAction(a.action, a.meta)}
-                    {typeof team === "object" && team ? <span className="text-faint"> · {(team as { name: string }).name}</span> : null}
-                  </span>
-                  <span className="shrink-0 text-xs text-faint">{timeAgo(a.created_at)}</span>
-                </li>
-              );
-            })}
+            {activity.map((a) => (
+              <li key={a.id} className="flex items-center justify-between gap-3 py-2.5 text-sm">
+                <span className="min-w-0 truncate">{describeUserAction(a.action, a.meta)}</span>
+                <span className="shrink-0 text-xs text-faint">{timeAgo(a.created_at)}</span>
+              </li>
+            ))}
           </ul>
         )}
       </section>
@@ -136,15 +133,15 @@ function describeUserAction(action: string, meta: Record<string, unknown>): stri
     case "USER_LOGIN": return "Signed in";
     case "USER_LOGOUT": return "Signed out";
     case "USER_REGISTERED": return "Registered an account";
-    case "FIELD_UPDATED": {
-      const field = String(meta.field ?? "field");
-      const prev = meta.previous ? String(meta.previous) : "empty";
-      const next = meta.new ? String(meta.new) : "empty";
-      return `Updated ${field}: ${prev} → ${next}`;
-    }
-    case "MEMBER_ADDED": return `Added to ${String(meta.team_name ?? "team")}`;
-    case "MEMBER_REMOVED": return `Removed from ${String(meta.team_name ?? "team")}`;
-    case "CHANGE_REVERTED": return `Reverted ${String(meta.field ?? "a field")}`;
+    case "EVENT_CREATED": return "Created an event";
+    case "EVENT_UPDATED": return "Updated an event";
+    case "EVENT_PUBLISHED": return "Published an event";
+    case "EVENT_LOCKED": return "Locked an event";
+    case "EVENT_CANCELLED": return "Cancelled an event";
+    case "SIGNUP_CREATED": return "Signed up to an event";
+    case "SIGNUP_REMOVED": return "Removed a signup";
+    case "SIGNUP_MOVED": return "Moved a signup";
+    case "PERMISSION_CHANGED": return "Changed permissions";
     default: return action.toLowerCase().replaceAll("_", " ");
   }
 }

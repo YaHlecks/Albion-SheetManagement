@@ -15,7 +15,6 @@ export interface ActivityEvent {
   target_user_id: string | null;
   profiles: { ign: string } | { ign: string }[] | null;
   target: { ign: string } | { ign: string }[] | null;
-  teams: { name: string } | { name: string }[] | null;
 }
 
 const ACTION_LABELS: Record<string, { label: string; tone: string }> = {
@@ -27,16 +26,18 @@ const ACTION_LABELS: Record<string, { label: string; tone: string }> = {
   USER_ARCHIVED: { label: "Archived", tone: "badge-archived" },
   USER_LOGIN: { label: "Signed in", tone: "badge-neutral" },
   USER_LOGOUT: { label: "Signed out", tone: "badge-neutral" },
-  TEAM_CREATED: { label: "Team created", tone: "badge-draft" },
-  TEAM_RENAMED: { label: "Team renamed", tone: "badge-neutral" },
-  TEAM_ARCHIVED: { label: "Team archived", tone: "badge-archived" },
-  TEAM_OPENED: { label: "Team opened", tone: "badge-open" },
-  MEMBER_ADDED: { label: "Member added", tone: "badge-approved" },
-  MEMBER_REMOVED: { label: "Member removed", tone: "badge-rejected" },
-  SHEET_LOCKED: { label: "Sheet locked", tone: "badge-locked" },
-  SHEET_UNLOCKED: { label: "Sheet unlocked", tone: "badge-open" },
-  FIELD_UPDATED: { label: "Field updated", tone: "badge-pending" },
-  CHANGE_REVERTED: { label: "Change reverted", tone: "badge-draft" },
+  EVENT_CREATED: { label: "Event created", tone: "badge-draft" },
+  EVENT_UPDATED: { label: "Event updated", tone: "badge-pending" },
+  EVENT_PUBLISHED: { label: "Event published", tone: "badge-approved" },
+  EVENT_LOCKED: { label: "Event locked", tone: "badge-locked" },
+  EVENT_COMPLETED: { label: "Event completed", tone: "badge-archived" },
+  EVENT_CANCELLED: { label: "Event cancelled", tone: "badge-rejected" },
+  EVENT_ARCHIVED: { label: "Event archived", tone: "badge-archived" },
+  EVENT_RESTORED: { label: "Event restored", tone: "badge-open" },
+  EVENT_DUPLICATED: { label: "Event duplicated", tone: "badge-neutral" },
+  SIGNUP_CREATED: { label: "Signed up", tone: "badge-approved" },
+  SIGNUP_REMOVED: { label: "Signup removed", tone: "badge-rejected" },
+  SIGNUP_MOVED: { label: "Signup moved", tone: "badge-pending" },
   PERMISSION_CHANGED: { label: "Permissions changed", tone: "badge-admin" },
 };
 
@@ -53,14 +54,12 @@ export function ActivityViewer({
   page,
   pageSize,
   filters,
-  teams,
 }: {
   events: ActivityEvent[];
   total: number;
   page: number;
   pageSize: number;
-  filters: { q: string; action: string; team: string };
-  teams: { id: string; name: string }[];
+  filters: { q: string; action: string };
 }) {
   const router = useRouter();
   const params = useSearchParams();
@@ -93,24 +92,16 @@ export function ActivityViewer({
             <option key={a} value={a}>{ACTION_LABELS[a]?.label ?? a}</option>
           ))}
         </select>
-        <select className="field lg:w-48" value={filters.team} onChange={(e) => update({ team: e.target.value })} aria-label="Filter by team">
-          <option value="">All teams</option>
-          {teams.map((t) => (
-            <option key={t.id} value={t.id}>{t.name}</option>
-          ))}
-        </select>
-        <p className="text-xs text-faint lg:ml-auto">{total} events</p>
+        <p className="text-xs text-faint lg:ml-auto">{total} entries</p>
       </div>
 
       <div className="panel divide-y divide-line overflow-hidden">
         {events.map((ev) => {
           const actor = first(ev.profiles)?.ign ?? "System";
           const target = first(ev.target)?.ign;
-          const team = first(ev.teams)?.name;
           const label = ACTION_LABELS[ev.action] ?? { label: ev.action, tone: "badge-neutral" };
           const isOpen = expanded === ev.id;
-          const hasDetail = ev.action === "FIELD_UPDATED" || ev.action === "CHANGE_REVERTED" ||
-            ev.action === "TEAM_RENAMED" || Boolean(ev.meta && Object.keys(ev.meta).length > 0);
+          const hasDetail = Boolean(ev.meta && Object.keys(ev.meta).length > 0);
 
           return (
             <div key={ev.id}>
@@ -124,7 +115,6 @@ export function ActivityViewer({
                 <span className="min-w-0 flex-1 text-sm">
                   <span className="font-semibold text-ink">{actor}</span>
                   {target && target !== actor ? <span className="text-muted"> → {target}</span> : null}
-                  {team ? <span className="text-faint"> · {team}</span> : null}
                 </span>
                 <span className="shrink-0 text-xs text-faint">{formatDateTime(ev.created_at)}</span>
                 {hasDetail ? <ChevronDown size={14} className={isOpen ? "rotate-180 text-faint" : "text-faint"} /> : null}
@@ -149,22 +139,16 @@ function EventDetail({ ev }: { ev: ActivityEvent }) {
   const rows: [string, string][] = [];
   const meta = ev.meta ?? {};
 
-  if (ev.action === "FIELD_UPDATED" || ev.action === "CHANGE_REVERTED") {
-    rows.push(["Field", String(meta.field ?? "—")]);
-    rows.push(["Previous value", meta.previous ? String(meta.previous) : "(empty)"]);
-    if (ev.action === "CHANGE_REVERTED") {
-      rows.push(["Restored to", meta.reverted_to ? String(meta.reverted_to) : "(empty)"]);
-    } else {
-      rows.push(["New value", meta.new ? String(meta.new) : "(empty)"]);
-    }
-  }
-  if (meta.team_name) rows.push(["Team", String(meta.team_name)]);
+  if (meta.slot_id) rows.push(["Slot", String(meta.slot_id)]);
+  if (meta.ign) rows.push(["IGN", String(meta.ign)]);
   if (meta.role) rows.push(["Role", String(meta.role)]);
+  if (meta.title) rows.push(["Event", String(meta.title)]);
   if (meta.previous_status) rows.push(["Previous status", String(meta.previous_status)]);
   if (meta.new_status) rows.push(["New status", String(meta.new_status)]);
-  if (meta.previous && meta.new) rows.push(["Change", `${String(meta.previous)} → ${String(meta.new)}`]);
+  if (meta.previous_slot) rows.push(["Previous slot", String(meta.previous_slot)]);
+  if (meta.by) rows.push(["By", String(meta.by)]);
   if (meta.admin_action) rows.push(["Admin action", String(meta.admin_action)]);
-  rows.push(["Event ID", ev.id]);
+  rows.push(["Entry ID", ev.id]);
 
   return (
     <dl className="desc-list grid gap-x-8 gap-y-3 sm:grid-cols-2">

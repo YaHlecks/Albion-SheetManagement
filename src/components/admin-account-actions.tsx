@@ -59,7 +59,7 @@ export function AccountActions({ account }: { account: AccountActionsData }) {
             {s === "pending" ? (
               <>
                 <button type="button" role="menuitem" className="menu-item" disabled={busy}
-                  onClick={() => { close(); setConfirm({ title: `Approve ${account.ign}?`, body: "The account will gain access to the system and any assigned teams.", confirmLabel: "Approve", action: "approve_user" }); }}>
+                  onClick={() => { close(); setConfirm({ title: `Approve ${account.ign}?`, body: "The account will gain access to events and can sign up for masses.", confirmLabel: "Approve", action: "approve_user" }); }}>
                   Approve account
                 </button>
                 <button type="button" role="menuitem" className="menu-item menu-item-danger" disabled={busy}

@@ -218,5 +218,3 @@ export function authErrorResponse(error: unknown): Response {
   return Response.json({ error: "Something went wrong. Please try again." }, { status: 500 });
 }
 
-export type { TeamRole } from "./roles";
-export { TEAM_ROLES, isTeamRole } from "./roles";

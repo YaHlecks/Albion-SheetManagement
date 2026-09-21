@@ -1,6 +1,6 @@
-# Albion Team Sheets
+# Albion Event Sheets
 
-Team sheet management platform for Albion Online guilds — controlled team sheets, account approval, activity tracking and moderation in one place. Replaces shared spreadsheets with a permissioned, fully-audited system.
+Event / mass scheduling and sign-up system for Albion Online guilds — the admin (caller) prepares a mass spreadsheet (parties, roles, required builds), publishes it, and approved members sign themselves into slots. Replaces shared spreadsheets with a live, permissioned, fully-audited system.
 
 ## Tech Stack
 
@@ -51,10 +51,10 @@ npm run db:bootstrap -- you@example.com
 ## The Complete Chain
 
 ```
-REGISTER → VERIFY EMAIL → AUTHENTICATE → ACCOUNT APPROVAL → TEAM ASSIGNMENT →
-TEAM ACCESS → MASS SHEETS (parties → roles → builds → IGN slots) →
-REALTIME SLOT FILLING → AUTOMATIC CHANGE TRACKING →
-ADMIN REVIEW → MODERATION / REVERT / LOCK
+REGISTER → VERIFY EMAIL → AUTHENTICATE → ACCOUNT APPROVAL →
+EVENT PUBLISHED (notification) → MEMBER SIGNS INTO A SLOT →
+REALTIME ROSTER UPDATES → ADMIN LOCKS ROSTER → MASS HAPPENS →
+COMPLETED / ARCHIVED (full audit trail)
 ```
 
 ### Email verification vs password recovery vs account approval
@@ -92,49 +92,52 @@ and the full Supabase configuration checklist live in
 
 Every step is enforced **server-side** (database RLS + security-definer RPCs + server route guards), never only in the UI.
 
-## Mass Sheets (Albion mass organization)
+## Events (mass scheduling & sign-ups)
 
-The core feature replacing shared Excel/Google Sheets for mass organization.
-
-**Model** (`supabase/migrations/0004_mass_sheets.sql`):
+The core model (`supabase/migrations/0001_init.sql`):
 
 ```
-teams → mass_sheets (title, location, set, mass_at timestamptz, instructions,
-        status: draft | published | locked | archived)
-             → mass_parties (name, fill_note, sort_order)
-                  → mass_slots (role, build_name, priority, required, sort_order)
-                       → mass_assignments (UNIQUE slot_id, user_id, ign)
+profiles → events (title, location, portal, set, event_date, massing_time,
+           timezone, caller, instructions,
+           status: draft | published | locked | completed | cancelled | archived,
+           is_template)
+              → event_parties (name, fill_note, sort_order)
+                   → event_slots (role, equipment, tier_requirement, priority,
+                                  required, notes, sort_order)
+                        → event_signups (UNIQUE slot_id, UNIQUE (event_id, user_id),
+                                         ign, note, signed_up_at)
+albion_equipment (catalog) · notifications · audit_logs
 ```
 
-**Admin** — `/admin/sheets`: card list with live fill counters; 5-step builder
-(`/admin/sheets/new`, `/admin/sheets/[id]/edit`) covering mass information →
-parties (add/rename/duplicate/delete, fill notes) → slots (role/build with
-suggestions + free custom text, priority, required, reorder) → team assignment →
-preview. One atomic `save_mass_sheet` RPC saves the whole structure and
-preserves assignments on untouched slots; deleting an assigned slot warns
-first. Lifecycle actions (publish / lock / unlock / archive / restore) and
-`duplicate` (copies structure, never assignments) are separate audited RPCs.
+**Admin** — `/admin/events`: status tabs, event cards with live fill counters;
+4-step builder (`/admin/events/new`) covering information → parties (add /
+rename / duplicate / delete, fill notes) → slots (roles + equipment with the
+Albion browser, tier requirements, priorities, reorder) → preview. Lifecycle:
+publish (notifies all approved members), lock, unlock, complete, cancel,
+archive, duplicate (structure only, never signups). Signup management: assign
+an approved member to any slot, move, or remove — all audited.
 
-**Member** — team page → *Mass Sheets* → sheet view styled like an Albion
-sheet (MASS LOCATION / SET / MASSING TIME header, instructions panel, party
-tables on desktop, party cards on mobile). Members claim an open slot with a
-prefilled IGN modal, unclaim their own, and see everyone's changes in realtime
-(one Supabase Realtime channel per sheet, cleaned up on unmount).
+**Member** — dashboard and `/events` show upcoming masses with fill progress;
+the event page is a spreadsheet-style sheet (MASS LOCATION / SET / MASSING
+TIME / CALLER header, instructions, party tables, mobile party cards). Members
+claim an open slot (IGN comes from their profile), leave it, or filter by
+role / party / status — with realtime updates via one Supabase Realtime
+channel per event.
 
 **Enforcement** — all in the database, verified by `npm run db:doctor`:
 
 | Table | anon | authenticated | writes |
 |---|---|---|---|
-| `mass_sheets` | none | SELECT (team members see published/locked/archived; drafts admin-only) | RPC only |
-| `mass_parties` / `mass_slots` | none | SELECT (visible when sheet visible) | RPC only |
-| `mass_assignments` | none | SELECT + own-row-only on published sheets | RPCs (`claim_mass_slot`, `unclaim_mass_slot`, `admin_set_slot_assignment`) |
+| `events` / parties / slots | none | SELECT (published/locked/completed; drafts & templates admin-only) | RPC only |
+| `event_signups` | none | SELECT + own-row-only on published events | RPCs (`claim_event_slot`, `leave_event_slot`, `admin_set_signup`) |
+| `albion_equipment` | none | SELECT | admin RPC / seed |
+| `notifications` | none | own rows, mark-read | insert via publish RPC |
+| `audit_logs` | none | admin read | RPC/trigger inserts only |
 
-Concurrent claims of the same slot are decided by the `UNIQUE(slot_id)`
-constraint; the loser receives `SLOT_TAKEN` and a friendly message. Pending,
-suspended and rejected accounts are rejected by the claim RPC
-(`ACCOUNT_NOT_APPROVED`); non-members by `NOT_TEAM_MEMBER`. Claim, unclaim,
-admin assign/move/clear, publish/lock/archive and structure saves all write
-`audit_logs` rows via the existing append-only audit path.
+Concurrent claims of the same slot are decided by `UNIQUE(slot_id)`; the loser
+gets a friendly "slot was just taken" message. One signup per member per event
+is a second unique constraint. Pending / suspended / rejected accounts are
+rejected inside the RPCs, never just in the UI.
 
 ## Architecture
 
@@ -146,35 +149,30 @@ src/
     verify-email/             dedicated email-verification experience (per-state)
     auth/callback/            confirmation/recovery code exchange (flow-aware)
     (app)/                    authenticated shell (guarded layout)
-      dashboard/              member dashboard
-      teams/                  member teams + team sheet (core feature)
+      dashboard/              member dashboard (upcoming events + my signups)
+      events/                 event browse + spreadsheet-style event page
       notifications/          full notification list
       profile/                profile & password settings
-      admin/                  dashboard, approvals, members, teams, activity, settings
+      admin/                  dashboard, events (builder + lifecycle), approvals,
+                              members, activity, settings
     api/
       auth/recover/           rate-limited recovery proxy
-      sheet/update-field/     sheet cell autosave (RPC-backed)
-      admin/action/           single guarded admin action endpoint (RPC-backed)
-      admin/revert-field/     admin revert + audit + notification
-      admin/search-users/     admin member-picker search
+      admin/action/           guarded member-management endpoint (RPC-backed)
   components/                 design-system primitives + feature components
   lib/                        env, supabase clients (browser/server/admin), auth, audit, validation
-supabase/migrations/0001_init.sql   schema + triggers + RPCs + RLS (single idempotent file)
+supabase/migrations/0001_init.sql   event schema + RPCs + RLS (single idempotent file)
+supabase/reset.sql                 destructive DEVELOPMENT reset (never touches auth.users)
 middleware.ts                 session refresh + route protection (Node runtime)
 ```
 
 ### Database security model
 
-- **RLS on every table, recursion-free.** Every cross-table authorization check in a policy goes through a `security definer` helper (`is_platform_admin()`, `is_team_member()`, `is_team_editable()`, `shares_team_with_me()`), which evaluates as the table owner and therefore never re-enters RLS. Policies never query their own table — the classic cause of Postgres `42P17: infinite recursion detected in policy`.
-- **Every operation gets its own policy** (SELECT/INSERT/UPDATE/DELETE separated per table); there is no broad one-size-fits-all policy.
-- **No client writes to protected tables.** `audit_logs` has a single admin-only SELECT policy and no write policies; `notifications` are scoped to their owner. Privileged writes flow exclusively through `security definer` RPCs and DB triggers.
-- **Members never read `audit_logs` directly.** The dashboard uses the `recent_own_activity()` definer RPC, which returns only events where the caller is the actor or the target.
-- **`admin_action` RPC** performs privileged operations with the admin check *inside* the function. In service-role mode the application server passes `p_actor_id` from its own server-verified session so audit rows still carry the real acting admin — the browser can never supply it.
-- **`update_member_field` RPC** re-validates membership, account status, team status and sheet lock atomically on every cell save — the frontend is a convenience, not the gate.
-- **Hardened RPCs.** `log_audit` rejects actions the database records automatically and restricts everything else to admins (logout excepted); `notify_user` is admin/server-only so members cannot spoof notifications; `ensure_profile` provisions a missing profile on first login using the verified JWT identity only, and can never grant admin.
-- **Append-only audit trail.** Field changes record actor, target, team, field, previous value and new value. Reverts restore the value and write a `CHANGE_REVERTED` event; nothing is ever edited or deleted.
-- **Account lifecycle**: `pending → approved → suspended/reactivated → archived` (soft delete; history preserved), plus `rejected`. Account approval and team membership are independent.
-
+- **RLS on every table, recursion-free.** Cross-table visibility goes through `security definer` helpers (`is_event_admin()`, `is_event_visible()`, `is_event_party_visible()`, `is_event_slot_visible()`), which evaluate as the table owner and never re-enter RLS. No policy queries its own table — the classic cause of `42P17: infinite recursion detected in policy`.
+- **Two user levels (§5)**: admin (`is_platform_admin` + `approved`, resolved inside the database) and approved member. Drafts and templates are admin-only; published/locked/completed events are visible to approved members.
+- **No client writes to protected tables.** At grant level `authenticated` has SELECT only; every write flows through a `security definer` RPC that re-verifies identity, approval and event status inside the database. Members can only ever write their own signup row.
+- **Signup integrity** is enforced by two unique constraints (`slot_id` — one member per slot; `(event_id, user_id)` — one signup per event) plus in-RPC checks: approved account, published event, no duplicate signup. Races surface as friendly `SLOT_TAKEN` / `ALREADY_SIGNED_UP` codes.
+- **Append-only audit trail.** Publish/lock/cancel/complete/archive, structure saves, duplications, signups, moves and member-management actions all write `audit_logs`; members cannot read or write them.
+- **Account lifecycle**: `pending → approved → suspended/reactivated → archived` (soft delete), plus `rejected`. The first account on a fresh database is bootstrapped admin+approved inside the `handle_new_user` trigger.
 ## Scripts
 
 | Script | Purpose |
@@ -184,7 +182,8 @@ middleware.ts                 session refresh + route protection (Node runtime)
 | `npm run typecheck` | `tsc --noEmit` |
 | `npm test` | Vitest unit tests (validation + permission logic + DB policy regression guards) |
 | `npm run db:push` | Apply `supabase/migrations/*.sql` via `DATABASE_URL` |
-| `npm run db:bootstrap -- email` | Recovery: promote a registered account to platform admin (first admin is automatic on a fresh DB) |
+| `npm run db:reset` | ⚠️ Destructive DEVELOPMENT reset: drops the app schema (never `auth.users`), typed confirmation required |
+| `npm run db:doctor` | Live verification: tables, grants, RLS, RPCs, role simulation, claim-race proof, legacy-object check |
 
 ## Deployment (Vercel)
 

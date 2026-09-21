@@ -8,11 +8,11 @@ const outfit = Outfit({ subsets: ["latin"], variable: "--font-outfit", display: 
 
 export const metadata: Metadata = {
   title: {
-    default: "Albion Team Sheets — Team Sheet Management",
-    template: "%s · Albion Team Sheets",
+    default: "Albion Event Sheets — Mass Scheduling & Sign-ups",
+    template: "%s · Albion Event Sheets",
   },
   description:
-    "Controlled team sheets, approved members, activity tracking and administrator moderation for Albion Online guilds.",
+    "Event scheduling and mass sign-ups for Albion Online guilds: parties, builds, member self-registration, notifications and admin oversight.",
 };
 
 export const viewport: Viewport = {

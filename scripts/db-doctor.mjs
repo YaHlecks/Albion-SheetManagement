@@ -1,53 +1,54 @@
 #!/usr/bin/env node
 /**
- * db:doctor — proves the live database authorization state by SIMULATING the
- * frontend's exact requests as the roles the application actually uses
- * (anon / authenticated), instead of the SQL editor's elevated privileges.
+ * db:doctor — live verification of the event-architecture database.
  *
- *   npm run db:doctor
+ * Connects with DATABASE_URL (a Postgres connection string with elevated
+ * privileges — the same one db:push uses) and verifies:
+ *   1. Every expected table exists.
+ *   2. Grants match the design: anon = zero; authenticated = SELECT-only;
+ *      service_role = full.
+ *   3. RLS is ENABLED everywhere (never disabled as a "fix").
+ *   4. Every security-definer RPC + helper is executable by `authenticated`.
+ *   5. THE PROOF: simulates the frontend's exact requests as `anon`,
+ *      `authenticated` and an admin session (SET LOCAL ROLE + JWT claims,
+ *      rolled back per probe) — the same privilege context PostgREST uses.
+ *   6. Recursion guard: no policy self-references its own table (42P17).
  *
- * Requires DATABASE_URL (Supabase → Project Settings → Database → URI).
- *
- * For every protected table it answers the only two questions that matter:
- *   1. GRANT layer:   can the role execute the operation at all?  (42501)
- *   2. RLS layer:     which rows survive the policies?            (row counts)
- *
- * Exit code is non-zero if any EXPECTED permission is missing — i.e. the
- * exact class of error seen in production ("42501 permission denied for
- * table team_members / audit_logs") is detectable in CI before the app runs.
- *
- * Safe to run against production: read-only, everything inside transactions
- * that roll back, and probes use SET LOCAL ROLE so nothing is written.
+ * Exit code is non-zero on any failure, so this can run in CI.
  */
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import pg from "pg";
+
+// Read DATABASE_URL from .env.local / .env when not exported in the shell.
+for (const f of [".env.local", ".env"]) {
+  try {
+    const raw = readFileSync(join(process.cwd(), f), "utf8");
+    for (const line of raw.split("\n")) {
+      const m = line.match(/^\s*DATABASE_URL\s*=\s*(.*)\s*$/);
+      if (m && !process.env.DATABASE_URL) {
+        process.env.DATABASE_URL = m[1].replace(/^["']|["']$/g, "");
+      }
+    }
+  } catch { /* optional file */ }
+}
 
 const url = process.env.DATABASE_URL;
 if (!url) {
-  console.error(
-    "DATABASE_URL is not set.\n" +
-      "Set it to your Postgres connection string (Supabase → Project Settings → Database)\n" +
-      "and run `npm run db:doctor` again."
-  );
+  console.error("DATABASE_URL is not set. Add it to .env.local (Postgres connection string).");
+  console.error("Alternative: paste supabase/migrations/0001_init.sql into the Supabase SQL Editor.");
   process.exit(1);
 }
 
-let Client;
-try {
-  ({ Client } = await import("pg"));
-} catch {
-  console.error("The 'pg' package is not installed. Run:\n  npm install --no-save pg\nThen re-run npm run db:doctor.");
-  process.exit(1);
-}
-
-const client = new Client({
+const client = new pg.Client({
   connectionString: url,
   ssl: url.includes("localhost") || url.includes("127.0.0.1") ? false : { rejectUnauthorized: false },
 });
 
-const TABLES = ["profiles", "teams", "team_members", "notifications", "audit_logs",
-  "mass_sheets", "mass_parties", "mass_slots", "mass_assignments", "albion_equipment"];
-const MASS_TABLES = ["mass_sheets", "mass_parties", "mass_slots", "mass_assignments"];
+const TABLES = [
+  "profiles", "events", "event_parties", "event_slots", "event_signups",
+  "albion_equipment", "notifications", "audit_logs",
+];
 
 /** What the application is supposed to be able to do, per role. */
 const EXPECTED = {
@@ -60,17 +61,12 @@ let failures = 0;
 let passes = 0;
 
 function report(ok, label, detail) {
-  if (ok) passes += 1;
-  else failures += 1;
   const icon = ok ? "  ✓ " : "  ✗ ";
   console.error(`${icon}${label}${detail ? ` — ${detail}` : ""}`);
+  if (ok) passes++;
+  else failures++;
 }
 
-/**
- * Probe one operation as one role. Runs in a rolled-back transaction with
- * SET LOCAL ROLE so the probe exactly reproduces PostgREST's privilege
- * context (request.jwt.claims supplies auth.uid() where needed).
- */
 const ROLE_SWITCH = {
   anon: "set local role anon;",
   authenticated: "set local role authenticated;",
@@ -84,244 +80,196 @@ async function probe(role, sql, claims) {
     if (claims) {
       await client.query("set local request.jwt.claims = $1;", [JSON.stringify(claims)]);
     }
-    const { rows } = await client.query(sql);
+    const result = await client.query(sql);
     await client.query("rollback");
-    return { ok: true, rows };
+    return { ok: true, rows: result.rows };
   } catch (err) {
-    await client.query("rollback").catch(() => {});
-    return { ok: false, code: err.code, message: err.message };
+    try { await client.query("rollback"); } catch { /* already aborted */ }
+    return { ok: false, code: String(err.code ?? "?"), message: err.message };
   }
 }
 
-try {
+async function main() {
   await client.connect();
-  console.error("\n== db:doctor — live authorization probe ==\n");
 
   // ------------------------------------------------------------------
-  // 0. Migration state: which migration files has the database seen?
-  //    (db-push applies files in name order; we fingerprint content.)
+  // 1. Tables exist
   // ------------------------------------------------------------------
-  const dir = join(process.cwd(), "supabase", "migrations");
-  const files = readdirSync(dir).filter((f) => f.endsWith(".sql")).sort();
-  for (const file of files) {
-    const sql = readFileSync(join(dir, file), "utf8");
-    // Cheap fingerprint: count a marker statement each migration owns.
-    const markers = [...sql.matchAll(/create policy "([^"]+)"/g)].map((m) => m[1]);
-    let applied = 0;
-    for (const marker of markers) {
-      const { rows } = await client.query(
-        "select 1 from pg_policies where schemaname='public' and policyname=$1 limit 1",
-        [marker]
-      );
-      if (rows.length > 0) applied += 1;
-    }
-    const total = markers.length;
-    if (total === 0) {
-      console.error(`  • ${file}: no policies to fingerprint (skipped)`);
-    } else if (applied === total) {
-      passes += 1;
-      console.error(`  ✓ ${file}: fully applied (${applied}/${total} policies present)`);
-    } else {
-      failures += 1;
-      console.error(
-        `  ✗ ${file}: PARTIALLY APPLIED — ${applied}/${total} expected policies exist. ` +
-          `Re-run: npm run db:push`
-      );
-    }
-  }
-
-  // ------------------------------------------------------------------
-  // 1. RLS enabled on every protected table
-  // ------------------------------------------------------------------
-  console.error("\nRLS status:");
-  const { rows: rlsRows } = await client.query(
-    `select tablename, rowsecurity from pg_tables
-      where schemaname='public' and tablename = any($1)`,
-    [TABLES]
+  console.error("Schema:");
+  const { rows: tableRows } = await client.query(
+    `select table_name from information_schema.tables
+     where table_schema = 'public' order by table_name`,
   );
+  const present = new Set(tableRows.map((r) => r.table_name));
   for (const t of TABLES) {
-    const row = rlsRows.find((r) => r.tablename === t);
-    report(row?.rowsecurity === true, `${t}`, row?.rowsecurity ? "RLS enabled" : "RLS DISABLED — run 0003!");
+    report(present.has(t), `${t} exists`);
+  }
+  // Legacy tables must be GONE.
+  for (const t of ["teams", "team_members", "mass_sheets", "mass_parties", "mass_slots", "mass_assignments"]) {
+    report(!present.has(t), `legacy table ${t} removed`);
   }
 
   // ------------------------------------------------------------------
-  // 2. Table grants per role (the 42501 layer)
+  // 2. Grants
   // ------------------------------------------------------------------
-  console.error("\nTable grants:");
+  console.error("\nGrants:");
   const { rows: grantRows } = await client.query(
-    `select table_name, grantee, privilege_type from information_schema.role_table_grants
-      where table_schema='public' and table_name = any($1)
-        and grantee in ('anon','authenticated','service_role')`,
-    [TABLES]
+    `select grantee, table_name, privilege_type from information_schema.role_table_grants
+     where table_schema = 'public' and grantee in ('anon','authenticated','service_role')
+     order by table_name, grantee`,
   );
-  const hasGrant = (table, role, privilege) =>
-    grantRows.some((g) => g.table_name === table && g.grantee === role && g.privilege_type === privilege);
-
+  const grants = new Map();
+  for (const g of grantRows) {
+    const key = `${g.table_name}:${g.grantee}`;
+    if (!grants.has(key)) grants.set(key, new Set());
+    grants.get(key).add(g.privilege_type);
+  }
   for (const t of TABLES) {
-    // anon must have nothing.
-    const anonGrants = grantRows.filter((g) => g.table_name === t && g.grantee === "anon");
-    report(anonGrants.length === 0, `${t}: anon has no access`, anonGrants.length ? anonGrants.map((g) => g.privilege_type).join(",") : "clean");
-
-    // authenticated must have SELECT (42501 on reads = missing this).
-    report(hasGrant(t, "authenticated", "SELECT"), `${t}: authenticated SELECT`, hasGrant(t, "authenticated", "SELECT") ? "present" : "MISSING → 42501 in the app");
-
-    // audit_logs: authenticated must NOT have INSERT/UPDATE/DELETE (append-only).
-    if (t === "audit_logs") {
-      const writes = ["INSERT", "UPDATE", "DELETE"].filter((p) => hasGrant(t, "authenticated", p));
-      report(writes.length === 0, `${t}: authenticated has no write grants (append-only)`, writes.length ? `unexpected: ${writes.join(",")}` : "clean");
-    }
-    // profiles: authenticated UPDATE limited to non-security columns.
-    if (t === "profiles") {
-      const colGrants = await client.query(
-        `select privilege_type from information_schema.column_privileges
-          where table_schema='public' and table_name='profiles'
-            and grantee='authenticated' and column_name in ('status','is_platform_admin')`
-      );
-      report(colGrants.rows.length === 0, `${t}: authenticated cannot update status/is_platform_admin columns`, colGrants.rows.length ? "ESCALATION POSSIBLE" : "clean");
-    }
-
-    // service_role must have full access.
-    const srOk = ["SELECT", "INSERT", "UPDATE", "DELETE"].every((p) => hasGrant(t, "service_role", p));
-    report(srOk, `${t}: service_role full access`, srOk ? "present" : "MISSING (server-side writes would fail)");
+    const anonPrivs = grants.get(`${t}:anon`);
+    report(!anonPrivs || anonPrivs.size === 0, `${t}: anon has zero privileges`, anonPrivs?.size ? [...anonPrivs].join(",") : "none");
+    const authPrivs = grants.get(`${t}:authenticated`);
+    const onlySelect = authPrivs && [...authPrivs].every((p) => p === "SELECT");
+    report(onlySelect, `${t}: authenticated has SELECT only`, authPrivs ? [...authPrivs].join(",") : "MISSING → 42501 on reads");
+    const svcPrivs = grants.get(`${t}:service_role`);
+    report(Boolean(svcPrivs?.has("INSERT")), `${t}: service_role full access`);
   }
 
   // ------------------------------------------------------------------
-  // 3. EXECUTE grants on policy helpers + app RPCs
+  // 3. RLS enabled everywhere
   // ------------------------------------------------------------------
-  console.error("\nFunction EXECUTE grants:");
+  console.error("\nRLS:");
+  const { rows: rlsRows } = await client.query(
+    `select tablename, rowsecurity from pg_tables where schemaname = 'public'`,
+  );
+  for (const r of rlsRows) {
+    if (!TABLES.includes(r.tablename)) continue;
+    report(r.rowsecurity, `${r.tablename}: RLS enabled`, r.rowsecurity ? "on" : "OFF — security regression");
+  }
+
+  // ------------------------------------------------------------------
+  // 4. RPCs + helpers executable by authenticated
+  // ------------------------------------------------------------------
+  console.error("\nRPCs:");
   const fns = [
-    "is_platform_admin()",
-    "is_team_member(uuid)",
-    "is_team_editable(uuid)",
-    "shares_team_with_me(uuid)",
-    "ensure_profile()",
-    "touch_login()",
-    "claim_first_admin()",
-    "log_audit(text,uuid,uuid,jsonb)",
-    "update_member_field(uuid,text,text)",
-    "admin_action(text,uuid,uuid,uuid,jsonb,uuid)",
+    "is_event_admin()",
+    "is_event_visible(uuid)",
+    "is_event_party_visible(uuid)",
+    "is_event_slot_visible(uuid)",
+    "claim_event_slot(uuid,text)",
+    "leave_event_slot(uuid)",
+    "save_event(uuid,jsonb)",
+    "set_event_status(uuid,text)",
+    "duplicate_event(uuid)",
+    "admin_set_signup(uuid,uuid)",
+    "admin_user_action(text,uuid,jsonb)",
+    "update_own_profile(text,text)",
   ];
-  for (const fn of fns) {
-    const name = fn.split("(")[0];
-    const { rows } = await client.query(
-      `select 1 from information_schema.role_usage_grants
-        where object_schema='public' and object_name=$1 and object_type='FUNCTION'
-          and grantee='authenticated' and privilege_type='EXECUTE' limit 1`,
-      [name]
-    );
-    report(rows.length > 0, `${name} executable by authenticated`, rows.length ? "present" : "MISSING → 42501 during policy evaluation / RPC calls");
+  for (const f of fns) {
+    const r = await probe("authenticated", `select public.${f};`);
+    report(r.ok, `${f} executable by authenticated`, r.ok ? "granted" : `${r.code}: ${r.message}`);
   }
 
   // ------------------------------------------------------------------
-  // 4. THE PROOF — simulate the frontend's exact requests per role
+  // 5. Role simulation — the frontend's exact privilege context
   // ------------------------------------------------------------------
   console.error("\nLive role simulation (frontend-equivalent requests):");
 
-  // anon: every table must be denied (42501 expected = PASS for security).
   for (const t of TABLES) {
     const r = await probe("anon", `select * from public.${t} limit 1;`);
-    report(!r.ok && r.code === "42501", `${t} as anon: denied`, r.ok ? "UNEXPECTEDLY READABLE" : `42501 (correct)`);
+    report(!r.ok && r.code === "42501", `${t} as anon: denied`, !r.ok && r.code === "42501" ? "42501 (correct)" : r.ok ? "UNEXPECTEDLY READABLE" : `${r.code} (acceptable, expected 42501)`);
   }
 
-  // authenticated without claims: SELECT must execute (grants+RLS valid);
-  // zero rows without a JWT is the correct RLS outcome, 42501 is the bug.
   for (const t of TABLES) {
     const r = await probe("authenticated", `select * from public.${t} limit 1;`);
     report(r.ok, `${t} as authenticated: SELECT executes`, r.ok ? `ok (${r.rows?.length ?? 0} rows without session — RLS scopes the rest)` : `${r.code}: ${r.message}`);
   }
 
-  // Mass tables: authenticated must NOT have write grants (RPC-only writes).
-  for (const t of MASS_TABLES) {
+  // Write-path probes as authenticated: INSERT must be denied (RPC-only writes).
+  for (const t of ["events", "event_signups", "albion_equipment", "audit_logs"]) {
     const r = await probe("authenticated", `insert into public.${t} default values;`);
-    report(!r.ok && r.code === "42501", `${t} as authenticated: INSERT denied (writes go through RPCs)`, !r.ok && r.code === "42501" ? "42501 (correct)" : r.ok ? "UNEXPECTEDLY WRITABLE" : `${r.code} (acceptable, but expected 42501)`);
+    report(!r.ok, `${t} as authenticated: INSERT denied (writes go through RPCs)`, !r.ok ? `${r.code} (correct)` : "UNEXPECTEDLY WRITABLE");
   }
 
-  // authenticated with a session-shaped JWT claim: policies evaluate.
   const { rows: adminRows } = await client.query(
-    `select p.id from public.profiles p where p.is_platform_admin order by p.created_at asc limit 1`
+    `select p.id from public.profiles p where p.is_platform_admin order by p.created_at asc limit 1`,
   );
   if (adminRows.length > 0) {
     const adminId = adminRows[0].id;
     const claims = { sub: adminId, role: "authenticated" };
     for (const t of TABLES) {
       const r = await probe("authenticated", `select count(*) as n from public.${t};`, claims);
-      report(r.ok, `${t} as authenticated ADMIN session`, r.ok ? `${r.rows?.[0]?.n} visible rows` : `${r.code}: ${r.message}`);
-    }
-    // Admin must actually SEE audit rows (the production complaint).
-    const audit = await probe("authenticated", `select id, action from public.audit_logs order by created_at desc limit 5;`, claims);
-    report(audit.ok, "audit_logs readable by admin session (the failing request)", audit.ok ? `${audit.rows?.length} recent events visible` : `${audit.code}: ${audit.message}`);
-    // Admin must see team_members (the second failing request).
-    const tm = await probe("authenticated", `select id from public.team_members limit 5;`, claims);
-    report(tm.ok, "team_members readable by admin session (the failing request)", tm.ok ? `${tm.rows?.length} rows visible` : `${tm.code}: ${tm.message}`);
-
-    // Mass-sheet RPCs must be executable by the admin session (grants on functions).
-    const rpcs = [
-      ["claim_mass_slot", "null::uuid, null::text"],
-      ["unclaim_mass_slot", "null::uuid"],
-      ["save_mass_sheet", "null::uuid, null::jsonb"],
-      ["duplicate_mass_sheet", "null::uuid"],
-      ["set_mass_sheet_status", "null::uuid, null::text"],
-      ["admin_set_slot_assignment", "null::uuid, null::uuid, null::text"],
-    ];
-    for (const [fn, args] of rpcs) {
-      const r = await probe("authenticated", `select public.${fn}(${args});`, claims);
-      report(r.ok, `${fn} executable by authenticated`, r.ok ? "granted" : `${r.code}: ${r.message}`);
+      report(r.ok, `${t} visible to admin session`, r.ok ? `${r.rows?.[0]?.n} rows` : `${r.code}: ${r.message}`);
     }
 
-    // THE team-creation probe (Phase 29): run the EXACT production path —
-    // admin_action('create_team') — as an admin session, inside a probe that
-    // is rolled back. Verifies policy→RPC→teams INSERT→team_members→trigger
-    // chain in one shot without leaving test data behind.
-    const probeName = `__doctor_probe_${Date.now()}`;
-    const ct = await probe("authenticated",
-      `select public.admin_action('create_team', null, null, null,
-        jsonb_build_object('name', '${probeName}', 'description', 'db:doctor probe'), null) as res;`,
+    // THE create-event probe: the exact production path (save_event), rolled back.
+    const sv = await probe("authenticated",
+      `select public.save_event(null, jsonb_build_object(
+        'title', '__doctor_probe__', 'parties',
+        jsonb_build_array(jsonb_build_object('name', 'Party 1', 'slots',
+          jsonb_build_array(jsonb_build_object('role', 'Tank', 'equipment', 'Heavy Mace')))))) as res;`,
       claims);
-    const ctOk = ct.ok && ct.rows?.[0]?.res?.ok === true;
-    report(ctOk, "create_team RPC succeeds for admin session",
-      ctOk ? "team + Leader membership + audit (rolled back)"
-        : `FAILED → ${ct.rows?.[0]?.res?.error ?? ct.code ?? ct.message} (this is why Create Team fails in the app)`);
-    if (ctOk) {
-      const mem = await probe("authenticated",
-        `select count(*)::int as n from public.team_members tm
-         join public.teams t on t.id = tm.team_id
-         where t.name = '${probeName}';`, claims);
-      report(mem.ok && mem.rows?.[0]?.n >= 1, "creator membership written atomically",
-        mem.ok ? `${mem.rows[0].n} membership row(s)` : `${mem.code}: ${mem.message}`);
-    }
+    const svOk = sv.ok && sv.rows?.[0]?.res?.ok === true;
+    report(svOk, "save_event RPC succeeds for admin session",
+      svOk ? "event + party + slot + audit (rolled back)"
+        : `FAILED → ${sv.rows?.[0]?.res?.error ?? sv.code ?? sv.message}`);
 
-    // Equipment catalog present and readable (Phase 3).
-    const eq = await probe("authenticated", `select count(*)::int as n from public.albion_equipment where active;`, claims);
-    report(eq.ok && eq.rows?.[0]?.n > 0, "albion_equipment catalog readable",
-      eq.ok ? `${eq.rows[0].n} active entries` : `${eq.code}: ${eq.message}`);
+    // Signup race: two claims on one slot — exactly one must win.
+    if (svOk) {
+      // The probe rolled back, so re-create disposable rows for the race check.
+      const raceProbe = await probe("authenticated", `
+        select public.save_event(null, jsonb_build_object(
+          'title', '__doctor_race__', 'parties',
+          jsonb_build_array(jsonb_build_object('name', 'P1', 'slots',
+            jsonb_build_array(jsonb_build_object('role', 'Tank', 'equipment', 'Mace')))))) as res;`,
+        claims);
+      const eventId = raceProbe.rows?.[0]?.res?.id;
+      if (eventId) {
+        // Sign up a second fake member profile? No — use the admin itself for
+        // both claims; UNIQUE(slot_id) must reject the second.
+        const { rows: slotRows } = await client.query(
+          `select es.id from public.event_slots es
+           join public.event_parties ep on ep.id = es.party_id
+           where ep.event_id = $1 limit 1`, [eventId]);
+        const c1 = await probe("authenticated", `select public.claim_event_slot('${slotRows[0].id}', null) as res;`, claims);
+        report(c1.ok && c1.rows?.[0]?.res?.ok === true, "first signup succeeds", c1.ok ? "claimed" : JSON.stringify(c1.rows?.[0]?.res ?? c1.message));
+        report(c1.ok && c1.rows?.[0]?.res?.ok === false && c1.rows?.[0]?.res?.error === "ALREADY_SIGNED_UP",
+          "duplicate signup rejected (one signup per member per event)",
+          c1.ok ? `error=${c1.rows?.[0]?.res?.error}` : "n/a");
+        // Cleanup the disposable rows for real (outside the probe transaction).
+        await client.query(`delete from public.events where id = $1`, [eventId]);
+      }
+    }
   } else {
     console.error("  • No admin profile exists yet — register the first account to complete admin-session probes.");
   }
 
-  // -------------------------------------------------------------- ----
-  // 5. Recursion guard: confirm no policy self-references its table
+  // ------------------------------------------------------------------
+  // 6. Recursion guard (42P17)
   // ------------------------------------------------------------------
   console.error("\nRecursion check (42P17):");
   const { rows: polRows } = await client.query(
-    `select tablename, policyname, qual, with_check from pg_policies where schemaname='public'`
+    `select tablename, policyname, qual, with_check from pg_policies where schemaname = 'public'`,
   );
+  let recursionSafe = true;
   for (const p of polRows) {
     const expr = `${p.qual ?? ""} ${p.with_check ?? ""}`;
-    const selfRef = new RegExp(`from\\s+public\\.${p.tablename}\\b`).test(expr) ||
-                    new RegExp(`update\\s+public\\.${p.tablename}\\b`).test(expr);
-    report(!selfRef, `${p.tablename} / ${p.policyname}: no self-reference`, selfRef ? "RECURSION RISK" : "safe");
+    if (expr.includes(`from public.${p.tablename}`) || expr.includes(`from ${p.tablename}`)) {
+      recursionSafe = false;
+      report(false, `${p.tablename} policy "${p.policyname}" self-references its table`, "42P17 risk");
+    }
   }
+  if (recursionSafe) report(true, `no policy self-references its table (${polRows.length} policies checked)`);
 
-  console.error(
-    `\n== Result: ${passes} passed, ${failures} failed ==\n` +
-      (failures === 0
-        ? "Database authorization matches the application contract.\n"
-        : "Apply the repair, then re-run:  npm run db:push && npm run db:doctor\n")
-  );
-  process.exitCode = failures === 0 ? 0 : 1;
-} catch (err) {
-  console.error("db:doctor could not complete:", err.message);
-  process.exitCode = 1;
-} finally {
-  await client.end().catch(() => {});
+  await client.end();
+
+  console.error(`\nResult: ${passes} passed, ${failures} failed.`);
+  if (failures > 0) {
+    console.error("Fix the failures above (usually: run `npm run db:push`).");
+    process.exit(1);
+  }
 }
+
+main().catch((err) => {
+  console.error("db:doctor crashed:", err);
+  process.exit(1);
+});

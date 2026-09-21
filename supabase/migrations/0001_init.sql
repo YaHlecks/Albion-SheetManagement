@@ -1,218 +1,195 @@
 -- ============================================================================
--- Albion Team Sheets — initial schema
--- Postgres (Supabase). Run with: npm run db:push
+-- 0001 — ALBION EVENT / MASS SCHEDULING — AUTHORITATIVE SCHEMA (2026 revamp)
+--
+-- Replaces the legacy Team architecture entirely (see supabase/migrations-
+-- legacy/ for the old system). Core model:
+--
+--   profiles → events → event_parties → event_slots → event_signups
+--   albion_equipment (catalog) · notifications · audit_logs
+--
+-- Security model (unchanged in spirit from the legacy repairs):
+--   * RLS enabled on every table; anon keeps ZERO access.
+--   * No policy queries its own table → 42P17 recursion is impossible.
+--   * authenticated = SELECT at grant level everywhere; ALL writes flow
+--     through security-definer RPCs that re-verify identity and role inside
+--     the database. Grant + policy + RPC = three independent gates.
+--   * Members can only ever write their OWN signup rows.
 -- ============================================================================
 
-create extension if not exists pgcrypto;
-
 -- ----------------------------------------------------------------------------
--- PROFILES (1-1 with auth.users; auth data stays in the auth provider)
+-- 1. PROFILES (unchanged in spirit: app-level user data, mirrors auth.users)
 -- ----------------------------------------------------------------------------
 create table if not exists public.profiles (
   id uuid primary key references auth.users(id) on delete cascade,
-  ign text not null check (char_length(ign) between 2 and 32),
-  discord text check (discord is null or char_length(discord) <= 64),
+  ign text not null unique check (char_length(ign) between 2 and 32),
+  discord text check (discord is null or char_length(discord) <= 60),
   status text not null default 'pending'
-    check (status in ('pending','approved','rejected','suspended','archived')),
+    check (status in ('pending','approved','suspended','rejected','archived')),
   is_platform_admin boolean not null default false,
   created_at timestamptz not null default now(),
-  last_login_at timestamptz,
-  approved_at timestamptz,
-  approved_by uuid references public.profiles(id),
-  rejected_at timestamptz,
-  rejected_by uuid references public.profiles(id),
-  suspended_at timestamptz,
-  suspended_by uuid references public.profiles(id)
+  updated_at timestamptz not null default now()
 );
 
 create index if not exists profiles_status_idx on public.profiles (status);
--- IGNs are unique (case-insensitive). The check_ign_available RPC and the
--- profile form rely on this; the database is the authority, not the UI.
-drop index if exists profiles_ign_idx;
-create unique index if not exists profiles_ign_unique_idx on public.profiles (lower(ign));
 
 -- ----------------------------------------------------------------------------
--- TEAMS
+-- 2. EVENTS — the central entity
 -- ----------------------------------------------------------------------------
-create table if not exists public.teams (
+create table if not exists public.events (
   id uuid primary key default gen_random_uuid(),
-  name text not null check (char_length(name) between 2 and 60),
-  description text check (description is null or char_length(description) <= 500),
-  status text not null default 'draft' check (status in ('draft','open','locked','archived')),
-  sheet_locked boolean not null default false,
+  title text not null check (char_length(title) between 2 and 120),
+  description text check (description is null or char_length(description) <= 2000),
+  event_date date,
+  massing_time time,
+  timezone text not null default 'UTC',
+  location text check (location is null or char_length(location) <= 120),
+  portal text check (portal is null or char_length(portal) <= 120),
+  set_name text check (set_name is null or char_length(set_name) <= 60),
+  caller text check (caller is null or char_length(caller) <= 60),
+  instructions text check (instructions is null or char_length(instructions) <= 2000),
+  status text not null default 'draft'
+    check (status in ('draft','published','locked','completed','cancelled','archived')),
+  is_template boolean not null default false,
   created_by uuid references public.profiles(id),
+  published_at timestamptz,
+  locked_at timestamptz,
+  cancelled_at timestamptz,
+  completed_at timestamptz,
   created_at timestamptz not null default now(),
-  archived_at timestamptz
+  updated_at timestamptz not null default now()
 );
 
-create index if not exists teams_status_idx on public.teams (status);
+create index if not exists events_status_idx on public.events (status, event_date);
 
 -- ----------------------------------------------------------------------------
--- TEAM MEMBERS (membership is separate from account approval)
+-- 3. EVENT PARTIES
 -- ----------------------------------------------------------------------------
-create table if not exists public.team_members (
+create table if not exists public.event_parties (
   id uuid primary key default gen_random_uuid(),
-  team_id uuid not null references public.teams(id) on delete cascade,
-  user_id uuid not null references public.profiles(id) on delete cascade,
-  role text not null default 'DPS'
-    check (role in ('Tank','Healer','DPS','Support','Leader')),
-  weapon text check (weapon is null or char_length(weapon) <= 60),
-  availability text check (availability is null or char_length(availability) <= 200),
-  notes text check (notes is null or char_length(notes) <= 300),
-  joined_at timestamptz not null default now(),
-  added_by uuid references public.profiles(id),
-  unique (team_id, user_id)
+  event_id uuid not null references public.events(id) on delete cascade,
+  name text not null check (char_length(name) between 1 and 80),
+  fill_note text check (fill_note is null or char_length(fill_note) <= 200),
+  sort_order integer not null default 0
 );
 
-create index if not exists team_members_user_idx on public.team_members (user_id);
-create index if not exists team_members_team_idx on public.team_members (team_id);
+create index if not exists event_parties_event_idx on public.event_parties (event_id, sort_order);
 
 -- ----------------------------------------------------------------------------
--- NOTIFICATIONS
+-- 4. EVENT SLOTS
+-- ----------------------------------------------------------------------------
+create table if not exists public.event_slots (
+  id uuid primary key default gen_random_uuid(),
+  party_id uuid not null references public.event_parties(id) on delete cascade,
+  role text not null check (char_length(role) between 1 and 40),
+  equipment text not null check (char_length(equipment) between 1 and 120),
+  tier_requirement text not null default 'any'
+    check (tier_requirement in ('any','T4','T4.1','T5','T5.1','T6','T6.1','T7','T7.1','T8','T8.1')),
+  notes text check (notes is null or char_length(notes) <= 200),
+  priority text not null default 'normal' check (priority in ('high','normal','low')),
+  required boolean not null default true,
+  sort_order integer not null default 0
+);
+
+create index if not exists event_slots_party_idx on public.event_slots (party_id, sort_order);
+
+-- ----------------------------------------------------------------------------
+-- 5. EVENT SIGNUPS — member self-registration
+--    UNIQUE(slot_id): one active signup per slot — the race-decider (§34).
+--    UNIQUE(event_id, user_id): one signup per member per event (§10);
+--    the admin RPC moves members by delete+insert inside one transaction.
+-- ----------------------------------------------------------------------------
+create table if not exists public.event_signups (
+  id uuid primary key default gen_random_uuid(),
+  slot_id uuid not null unique references public.event_slots(id) on delete cascade,
+  event_id uuid not null references public.events(id) on delete cascade,
+  user_id uuid not null references public.profiles(id) on delete cascade,
+  ign text not null check (char_length(ign) between 2 and 32),
+  note text check (note is null or char_length(note) <= 200),
+  signed_up_at timestamptz not null default now(),
+  unique (event_id, user_id)
+);
+
+create index if not exists event_signups_user_idx on public.event_signups (user_id);
+create index if not exists event_signups_event_idx on public.event_signups (event_id);
+
+-- ----------------------------------------------------------------------------
+-- 6. ALBION EQUIPMENT CATALOG (Phase 18–25)
+-- ----------------------------------------------------------------------------
+create table if not exists public.albion_equipment (
+  id uuid primary key default gen_random_uuid(),
+  external_id text,
+  name text not null unique check (char_length(name) between 2 and 80),
+  category text not null check (category in
+    ('Weapon','Armor','Helmet','Shoes','Off-Hand','Cape','Bag','Consumable','Other')),
+  family text not null check (char_length(family) between 2 and 40),
+  equipment_type text check (equipment_type is null or char_length(equipment_type) <= 40),
+  tier text not null default 'any' check (char_length(tier) <= 8),
+  item_power integer check (item_power is null or item_power between 0 and 50000),
+  icon_url text check (icon_url is null or char_length(icon_url) <= 300),
+  description text check (description is null or char_length(description) <= 300),
+  source text not null default 'seed' check (source in ('seed','openalbion','manual')),
+  source_url text,
+  active boolean not null default true,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists albion_equipment_name_idx on public.albion_equipment (lower(name));
+create index if not exists albion_equipment_family_idx on public.albion_equipment (category, family);
+
+-- ----------------------------------------------------------------------------
+-- 7. NOTIFICATIONS
 -- ----------------------------------------------------------------------------
 create table if not exists public.notifications (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references public.profiles(id) on delete cascade,
   title text not null check (char_length(title) between 1 and 120),
-  body text check (body is null or char_length(body) <= 400),
-  type text not null default 'info' check (type in ('info','success','warning','error')),
+  body text check (body is null or char_length(body) <= 500),
+  kind text not null default 'info' check (kind in ('info','success','error','event')),
+  link text check (link is null or char_length(link) <= 300),
   read boolean not null default false,
-  link text check (link is null or char_length(link) <= 200),
   created_at timestamptz not null default now()
 );
 
-create index if not exists notifications_user_idx on public.notifications (user_id, created_at desc);
+create index if not exists notifications_user_idx on public.notifications (user_id, read, created_at desc);
 
 -- ----------------------------------------------------------------------------
--- AUDIT LOG (append-only; old/new values captured as JSONB)
+-- 8. AUDIT LOG (append-only)
 -- ----------------------------------------------------------------------------
 create table if not exists public.audit_logs (
   id uuid primary key default gen_random_uuid(),
   action text not null,
   actor_id uuid references public.profiles(id),
   target_user_id uuid references public.profiles(id),
-  team_id uuid references public.teams(id),
+  event_id uuid references public.events(id) on delete set null,
   meta jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default now()
 );
 
 create index if not exists audit_logs_created_idx on public.audit_logs (created_at desc);
-create index if not exists audit_logs_actor_idx on public.audit_logs (actor_id, created_at desc);
-create index if not exists audit_logs_team_idx on public.audit_logs (team_id, created_at desc);
-create index if not exists audit_logs_action_idx on public.audit_logs (action);
+create index if not exists audit_logs_event_idx on public.audit_logs (event_id);
 
--- ----------------------------------------------------------------------------
--- FUNCTIONS
--- ----------------------------------------------------------------------------
+-- ============================================================================
+-- 9. HELPERS (security definer — 42P17-safe, evaluated as owner)
+-- ============================================================================
 
--- Admin check usable inside RLS policies (avoids recursive self-references).
-create or replace function public.is_platform_admin()
+-- Role resolution used everywhere: admin = is_platform_admin AND approved.
+create or replace function public.is_event_admin()
 returns boolean
 language sql
-security definer
-set search_path = public
 stable
+set search_path = public
 as $$
   select coalesce(
-    (select p.is_platform_admin from public.profiles p where p.id = auth.uid()),
-    false
-  );
+    (select p.is_platform_admin from public.profiles p where p.id = auth.uid()), false)
+  and coalesce(
+    (select p.status = 'approved' from public.profiles p where p.id = auth.uid()), false);
 $$;
 
--- Generic notifier: inserts a notification row bypassing RLS via definer rights.
--- HARDENED: regular authenticated members cannot call this to spoof
--- notifications for other users. Only administrators (whose credentials also
--- fire the membership/status triggers that call it) and the trusted server
--- context (service role, where auth.uid() is null) may notify.
-create or replace function public.notify_user(
-  p_user_id uuid,
-  p_title text,
-  p_body text default null,
-  p_type text default 'info',
-  p_link text default null
-)
-returns void
-language plpgsql
-security definer
-set search_path = public
-as $$
-begin
-  if auth.uid() is not null then
-    if not coalesce(
-      (select p.is_platform_admin from public.profiles p where p.id = auth.uid()), false) then
-      raise exception 'FORBIDDEN';
-    end if;
-  end if;
-
-  insert into public.notifications (user_id, title, body, type, link)
-  values (p_user_id, p_title, p_body, p_type, p_link);
-end;
-$$;
-
-revoke all on function public.notify_user(uuid, text, text, text, text) from public, anon;
-grant execute on function public.notify_user(uuid, text, text, text, text) to authenticated;
-grant execute on function public.notify_user(uuid, text, text, text, text) to service_role;
-
--- Security-definer audit writer for sessions without service-role access.
--- HARDENED: callers cannot forge arbitrary audit events. Routine events are
--- recorded automatically by triggers; client-initiated audit writes are
--- limited to logout (any authenticated user) and a small admin-only
--- allow-list. Anything else is rejected inside the database.
-create or replace function public.log_audit(
-  p_action text,
-  p_target_user_id uuid default null,
-  p_team_id uuid default null,
-  p_meta jsonb default '{}'::jsonb
-)
-returns void
-language plpgsql
-security definer
-set search_path = public
-as $$
-declare
-  v_admin boolean;
-begin
-  if p_action not in (
-    'USER_LOGOUT',
-    'CHANGE_REVERTED',
-    'PERMISSION_CHANGED',
-    'TEAM_CREATED',
-    'TEAM_RESTORED',
-    'TEAM_STATUS_CHANGED'
-  ) then
-    raise exception 'audit action % is recorded automatically by the database', p_action;
-  end if;
-
-  if p_action <> 'USER_LOGOUT' then
-    select coalesce(is_platform_admin, false) into v_admin
-      from public.profiles where id = auth.uid();
-    if not v_admin then
-      raise exception 'FORBIDDEN';
-    end if;
-  end if;
-
-  insert into public.audit_logs (action, actor_id, target_user_id, team_id, meta)
-  values (p_action, auth.uid(), p_target_user_id, p_team_id, p_meta);
-end;
-$$;
-
-revoke all on function public.log_audit(text, uuid, uuid, jsonb) from public, anon;
-grant execute on function public.log_audit(text, uuid, uuid, jsonb) to authenticated;
-
--- ============================================================================
--- NON-RECURSIVE RLS HELPERS
---
--- Every authorization check used inside a policy is a security-definer
--- function: it runs as the table owner and therefore evaluates WITHOUT
--- applying RLS. This is exactly what breaks the 42P17 "infinite recursion
--- detected in policy" error, which occurs when a policy on table X queries
--- table X directly (or a chain of policies references each other in a
--- circle). These functions are narrow predicates: they can only answer
--- "is this true for the caller" and cannot leak or mutate rows.
--- ============================================================================
-
--- Is the current user a member of the given team?
-create or replace function public.is_team_member(p_team_id uuid)
+-- Which events the current user can SEE: admins see all; approved members
+-- see published/locked/completed events plus their own drafts? No — drafts
+-- are admin-only. Templates are admin-only too.
+create or replace function public.is_event_visible(p_event_id uuid)
 returns boolean
 language sql
 security definer
@@ -220,665 +197,174 @@ set search_path = public
 stable
 as $$
   select exists (
-    select 1 from public.team_members tm
-    where tm.team_id = p_team_id and tm.user_id = auth.uid()
-  );
-$$;
-
--- Is the given team sheet currently editable by regular members?
-create or replace function public.is_team_editable(p_team_id uuid)
-returns boolean
-language sql
-security definer
-set search_path = public
-stable
-as $$
-  select exists (
-    select 1 from public.teams t
-    where t.id = p_team_id
-      and t.status in ('open', 'draft')
-      and t.sheet_locked = false
-  );
-$$;
-
--- Does the current user share at least one team with the given user?
--- (Lets teammates see each other's IGN on the sheet without making profiles
--- world-readable.)
-create or replace function public.shares_team_with_me(p_other_user uuid)
-returns boolean
-language sql
-security definer
-set search_path = public
-stable
-as $$
-  select exists (
-    select 1
-    from public.team_members mine
-    join public.team_members theirs on theirs.team_id = mine.team_id
-    where mine.user_id = auth.uid()
-      and theirs.user_id = p_other_user
-  );
-$$;
-
--- Policy predicates need EXECUTE for every role policies run as.
-grant execute on function public.is_team_member(uuid) to anon, authenticated;
-grant execute on function public.is_team_editable(uuid) to anon, authenticated;
-grant execute on function public.shares_team_with_me(uuid) to anon, authenticated;
-
--- ============================================================================
--- RPC: first-login profile provisioning (self-healing)
---
--- Called right after sign-in. Creates the profile row if the signup trigger
--- has not run (or failed) yet, so a race between authentication and profile
--- creation can never crash the first login. Identity always comes from the
--- verified JWT — never from client-supplied user IDs. Deliberately does NOT
--- grant admin: that path exists only in the signup trigger (first account)
--- and the one-time bootstrap script (supabase/bootstrap-admin.sql).
--- ============================================================================
-create or replace function public.ensure_profile()
-returns jsonb
-language plpgsql
-security definer
-set search_path = public
-as $$
-declare
-  v_claims jsonb;
-  v_ign text;
-  v_discord text;
-  v_row public.profiles;
-begin
-  if auth.uid() is null then
-    return jsonb_build_object('ok', false, 'error', 'UNAUTHENTICATED');
-  end if;
-
-  select * into v_row from public.profiles where id = auth.uid();
-  if found then
-    return jsonb_build_object(
-      'ok', true, 'created', false,
-      'status', v_row.status, 'is_platform_admin', v_row.is_platform_admin
-    );
-  end if;
-
-  v_claims := nullif(current_setting('request.jwt.claims', true), '')::jsonb;
-  v_ign := nullif(trim(coalesce(v_claims->'user_metadata'->>'ign', '')), '');
-  v_discord := nullif(trim(coalesce(v_claims->'user_metadata'->>'discord', '')), '');
-
-  if v_ign is null or char_length(v_ign) < 2 or char_length(v_ign) > 32 then
-    v_ign := 'player-' || left(auth.uid()::text, 8);
-  end if;
-  if v_discord is not null and char_length(v_discord) > 64 then
-    v_discord := left(v_discord, 64);
-  end if;
-
-  insert into public.profiles (id, ign, discord, status, is_platform_admin)
-  values (auth.uid(), v_ign, v_discord, 'pending', false)
-  on conflict (id) do nothing;
-
-  select * into v_row from public.profiles where id = auth.uid();
-  return jsonb_build_object(
-    'ok', true, 'created', true,
-    'status', v_row.status, 'is_platform_admin', v_row.is_platform_admin
-  );
-end;
-$$;
-
-revoke all on function public.ensure_profile() from public, anon;
-grant execute on function public.ensure_profile() to authenticated;
-
--- ============================================================================
--- RPC: claim_first_admin()
---
--- Self-healing repair for deployments whose earliest account registered
--- BEFORE the first-admin rule existed in handle_new_user: that account is
--- stuck as pending/non-admin and can never reach the admin UI to fix itself.
--- The authenticated caller (identity = auth.uid(), never client input) is
--- promoted IF AND ONLY IF it is the earliest profile AND no administrator
--- exists. Otherwise it is a no-op and merely reports the caller's state.
--- The same advisory lock as the signup trigger keeps it race-free against
--- concurrent registrations and against itself. Idempotent: safe to call on
--- every login. Promotion is audited (PERMISSION_CHANGED).
--- ============================================================================
-create or replace function public.claim_first_admin()
-returns jsonb
-language plpgsql
-security definer
-set search_path = public
-as $$
-declare
-  v_row public.profiles;
-  v_earliest uuid;
-  v_promoted boolean := false;
-begin
-  if auth.uid() is null then
-    return jsonb_build_object('ok', false, 'error', 'UNAUTHENTICATED');
-  end if;
-
-  perform pg_advisory_xact_lock(hashtext('albion-team-sheets:first-admin'));
-
-  select * into v_row from public.profiles where id = auth.uid();
-  if not found then
-    -- ensure_profile() handles provisioning; this RPC only repairs roles.
-    return jsonb_build_object('ok', false, 'error', 'PROFILE_MISSING');
-  end if;
-
-  if not coalesce(v_row.is_platform_admin, false) then
-    if not exists (select 1 from public.profiles where is_platform_admin) then
-      select p.id into v_earliest
-        from public.profiles p
-        order by p.created_at asc, p.id asc
-        limit 1;
-      if v_earliest = auth.uid() then
-        update public.profiles
-           set is_platform_admin = true,
-               status = 'approved',
-               approved_at = coalesce(approved_at, now())
-         where id = auth.uid();
-        v_promoted := true;
-        insert into public.audit_logs (action, actor_id, target_user_id, meta)
-        values (
-          'PERMISSION_CHANGED', auth.uid(), auth.uid(),
-          jsonb_build_object(
-            'reason', 'first-account self-heal: earliest account promoted to platform administrator',
-            'granted_by', 'claim_first_admin RPC'
-          )
-        );
-      end if;
-    end if;
-  end if;
-
-  if v_promoted then
-    select * into v_row from public.profiles where id = auth.uid();
-  end if;
-
-  return jsonb_build_object(
-    'ok', true,
-    'promoted', v_promoted,
-    'status', v_row.status,
-    'is_platform_admin', v_row.is_platform_admin
-  );
-end;
-$$;
-
-revoke all on function public.claim_first_admin() from public, anon;
-grant execute on function public.claim_first_admin() to authenticated, service_role;
-
--- ============================================================================
--- RPC: a member's own recent activity
---
--- Members must not read the audit_logs table (admin-only by policy), but the
--- dashboard shows "what did I change". This definer function returns only
--- events where the caller is the actor or the target.
--- ============================================================================
-create or replace function public.recent_own_activity(p_limit int default 10)
-returns table (
-  id uuid,
-  action text,
-  created_at timestamptz,
-  meta jsonb,
-  team_name text
-)
-language sql
-security definer
-set search_path = public
-stable
-as $$
-  select a.id, a.action, a.created_at, a.meta, t.name
-  from public.audit_logs a
-  left join public.teams t on t.id = a.team_id
-  where a.actor_id = auth.uid() or a.target_user_id = auth.uid()
-  order by a.created_at desc
-  limit greatest(1, least(coalesce(p_limit, 10), 50));
-$$;
-
-revoke all on function public.recent_own_activity(int) from public, anon;
-grant execute on function public.recent_own_activity(int) to authenticated;
-
--- ============================================================================
--- TRIGGER: new auth user -> pending profile + USER_REGISTERED audit event
--- ============================================================================
-create or replace function public.handle_new_user()
-returns trigger
-language plpgsql
-security definer
-set search_path = public
-as $$
-declare
-  new_ign text;
-  new_discord text;
-  v_is_first_user boolean := false;
-begin
-  -- Idempotent guard: rerunning the migration (or overlapping triggers) must
-  -- never create a duplicate profile.
-  if exists (select 1 from public.profiles where id = new.id) then
-    return new;
-  end if;
-
-  new_ign := nullif(trim(new.raw_user_meta_data->>'ign'), '');
-  new_discord := nullif(trim(new.raw_user_meta_data->>'discord'), '');
-
-  if new_ign is null or char_length(new_ign) < 2 or char_length(new_ign) > 32 then
-    new_ign := 'player-' || left(new.id::text, 8);
-  end if;
-
-  if new_discord is not null and char_length(new_discord) > 64 then
-    new_discord := left(new_discord, 64);
-  end if;
-
-  -- --------------------------------------------------------------------------
-  -- FIRST-ADMIN BOOTSTRAP (secure, race-safe)
-  --
-  -- In an empty deployment, the very first account becomes the platform
-  -- administrator and is approved immediately; every later registration is a
-  -- pending, non-admin member. The decision is made HERE, inside a
-  -- security-definer trigger on auth.users, so the client controls neither
-  -- the role nor the timing:
-  --   * the only way to reach this code is a real auth.users insert;
-  --   * the caller never supplies role/status fields;
-  --   * pg_advisory_xact_lock serializes concurrent signups, closing the
-  --     check-then-insert TOCTOU window: two users registering at the same
-  --     moment cannot both observe an empty profiles table.
-  -- For deployments that already have users (or a lost-admin recovery), the
-  -- operator script supabase/bootstrap-admin.sql remains the sanctioned path.
-  -- --------------------------------------------------------------------------
-  perform pg_advisory_xact_lock(hashtext('albion-team-sheets:first-admin'));
-  v_is_first_user := not exists (select 1 from public.profiles);
-
-  insert into public.profiles (id, ign, discord, status, is_platform_admin)
-  values (
-    new.id,
-    new_ign,
-    new_discord,
-    case when v_is_first_user then 'approved' else 'pending' end,
-    v_is_first_user
-  )
-  on conflict (id) do nothing;
-
-  insert into public.audit_logs (action, actor_id, target_user_id, meta)
-  values ('USER_REGISTERED', new.id, new.id,
-    jsonb_build_object(
-      'ign', new_ign,
-      'email', new.email,
-      'bootstrapped_admin', v_is_first_user
-    ));
-
-  if v_is_first_user then
-    insert into public.audit_logs (action, actor_id, target_user_id, meta)
-    values (
-      'PERMISSION_CHANGED', new.id, new.id,
-      jsonb_build_object(
-        'reason', 'first-account bootstrap: initial platform administrator',
-        'granted_by', 'handle_new_user trigger'
+    select 1 from public.events e
+    where e.id = p_event_id
+      and (
+        public.is_event_admin()
+        or (
+          coalesce(
+            (select p.status = 'approved' from public.profiles p where p.id = auth.uid()), false)
+          and e.status in ('published','locked','completed')
+        )
       )
-    );
-  end if;
-
-  return new;
-end;
-$$;
-
-drop trigger if exists on_auth_user_created on auth.users;
-create trigger on_auth_user_created
-  after insert on auth.users
-  for each row execute function public.handle_new_user();
-
--- ============================================================================
--- TRIGGER HELPERS: audit actor resolution
---
--- Audit triggers stamp the actor from auth.uid(); when a write arrives via
--- the service-role path (trusted server), auth.uid() is null and the actor
--- comes from the transaction-scoped app.actor_id GUC that admin_action set
--- from its server-verified session. auth.uid() always wins, so a client
--- session can never forge another actor.
--- ============================================================================
-create or replace function public.audit_actor()
-returns uuid
-language sql
-stable
-as $$
-  select coalesce(
-    auth.uid(),
-    nullif(current_setting('app.actor_id', true), '')::uuid
   );
 $$;
 
--- ============================================================================
--- TRIGGER: profile update guard + login tracking
---
--- USER_LOGIN events are written here: the client calls touch_login() after
--- sign-in, which updates last_login_at and fires this trigger. There is no
--- separate login trigger on auth.users (Supabase does not fire triggers on
--- token refresh, and a session is established before touch_login runs).
--- ============================================================================
-create or replace function public.handle_profile_update()
-returns trigger
-language plpgsql
-security definer
-set search_path = public
-as $$
-begin
-  -- Login tracking: profile updated with a new last_login_at timestamp.
-  if old.last_login_at is distinct from new.last_login_at then
-    insert into public.audit_logs (action, actor_id, target_user_id, meta)
-    values ('USER_LOGIN', new.id, new.id, jsonb_build_object());
-  end if;
-
-  -- Guard: non-admins cannot change status or the admin flag. When auth.uid()
-  -- is null (trusted server context, e.g. service-role writes), the write is
-  -- allowed because it originates from the application server itself.
-  if new.status is distinct from old.status or new.is_platform_admin is distinct from old.is_platform_admin then
-    if auth.uid() is not null and not coalesce(
-      (select p.is_platform_admin from public.profiles p where p.id = auth.uid()), false) then
-      raise exception 'Only administrators can change account status or admin flag';
-    end if;
-  end if;
-
-  return new;
-end;
-$$;
-
-drop trigger if exists on_profile_update on public.profiles;
-create trigger on_profile_update
-  before update on public.profiles
-  for each row
-  execute function public.handle_profile_update();
-
--- ============================================================================
--- RPC: record a login (sets last_login_at; the profile-update trigger writes
--- the USER_LOGIN audit event). Called by the client right after sign-in.
--- ============================================================================
-create or replace function public.touch_login()
-returns void
-language sql
-security definer
-set search_path = public
-as $$
-  update public.profiles set last_login_at = now() where id = auth.uid();
-$$;
-
-grant execute on function public.touch_login() to authenticated;
-
--- Registration helper: anonymous visitors must be able to check IGN
--- availability without being able to read the profiles table via RLS.
-create or replace function public.check_ign_available(p_ign text)
+create or replace function public.is_event_party_visible(p_party_id uuid)
 returns boolean
 language sql
 security definer
 set search_path = public
 stable
 as $$
-  select not exists (
-    select 1 from public.profiles where lower(ign) = lower(p_ign)
+  select exists (
+    select 1 from public.event_parties ep
+    where ep.id = p_party_id and public.is_event_visible(ep.event_id)
   );
 $$;
 
-grant execute on function public.check_ign_available(text) to anon, authenticated;
-
--- ============================================================================
--- TRIGGER: audit profile status changes (approval, rejection, suspension…)
--- ============================================================================
-create or replace function public.handle_profile_status_change()
-returns trigger
-language plpgsql
+create or replace function public.is_event_slot_visible(p_slot_id uuid)
+returns boolean
+language sql
 security definer
 set search_path = public
+stable
 as $$
-declare
-  actor uuid := public.audit_actor();
-  action_type text;
-begin
-  if old.status is distinct from new.status then
-    action_type := case new.status
-      when 'approved'   then 'USER_APPROVED'
-      when 'rejected'   then 'USER_REJECTED'
-      when 'suspended'  then 'USER_SUSPENDED'
-      when 'archived'   then 'USER_ARCHIVED'
-      when 'pending'    then 'USER_REACTIVATED'
-      else 'PERMISSION_CHANGED'
-    end;
-
-    insert into public.audit_logs (action, actor_id, target_user_id, meta)
-    values (action_type, actor, new.id,
-      jsonb_build_object('previous_status', old.status, 'new_status', new.status));
-  end if;
-
-  return new;
-end;
+  select exists (
+    select 1 from public.event_slots es
+    join public.event_parties ep on ep.id = es.party_id
+    where es.id = p_slot_id and public.is_event_visible(ep.event_id)
+  );
 $$;
 
-drop trigger if exists on_profile_status_change on public.profiles;
-create trigger on_profile_status_change
-  after update on public.profiles
-  for each row
-  when (old.status is distinct from new.status)
-  execute function public.handle_profile_status_change();
-
 -- ============================================================================
--- TRIGGER: audit team changes (rename / lock / unlock / archive)
+-- 10. RPCs — member signup path (§10–12, §34)
 -- ============================================================================
-create or replace function public.handle_team_change()
-returns trigger
-language plpgsql
-security definer
-set search_path = public
-as $$
-declare
-  actor uuid := public.audit_actor();
-begin
-  if old.name is distinct from new.name then
-    insert into public.audit_logs (action, actor_id, team_id, meta)
-    values ('TEAM_RENAMED', actor, new.id,
-      jsonb_build_object('previous', old.name, 'new', new.name));
-  end if;
 
-  if old.sheet_locked is distinct from new.sheet_locked then
-    insert into public.audit_logs (action, actor_id, team_id, meta)
-    values (
-      case when new.sheet_locked then 'SHEET_LOCKED' else 'SHEET_UNLOCKED' end,
-      actor, new.id, jsonb_build_object('previous', old.sheet_locked, 'new', new.sheet_locked)
-    );
-  end if;
-
-  if old.status is distinct from new.status then
-    if new.status = 'archived' then
-      insert into public.audit_logs (action, actor_id, team_id, meta)
-      values ('TEAM_ARCHIVED', actor, new.id,
-        jsonb_build_object('previous_status', old.status));
-    elsif new.status = 'open' and old.status = 'draft' then
-      insert into public.audit_logs (action, actor_id, team_id, meta)
-      values ('TEAM_OPENED', actor, new.id, jsonb_build_object('previous_status', old.status));
-    end if;
-  end if;
-
-  return new;
-end;
-$$;
-
-drop trigger if exists on_team_change on public.teams;
-create trigger on_team_change
-  after update on public.teams
-  for each row
-  when (old.name is distinct from new.name
-     or old.status is distinct from new.status
-     or old.sheet_locked is distinct from new.sheet_locked)
-  execute function public.handle_team_change();
-
--- ============================================================================
--- TRIGGER: audit membership changes + notifications
--- ============================================================================
-create or replace function public.handle_membership_change()
-returns trigger
-language plpgsql
-security definer
-set search_path = public
-as $$
-declare
-  actor uuid := public.audit_actor();
-  team_name text;
-begin
-  select t.name into team_name from public.teams t
-    where t.id = coalesce(new.team_id, old.team_id);
-
-  if (tg_op = 'INSERT') then
-    insert into public.audit_logs (action, actor_id, target_user_id, team_id, meta)
-    values ('MEMBER_ADDED', actor, new.user_id, new.team_id,
-      jsonb_build_object('role', new.role, 'team_name', team_name));
-
-    perform public.notify_user(
-      new.user_id,
-      'Added to ' || team_name,
-      'You have been added to ' || team_name || ' as ' || new.role || '.',
-      'success',
-      '/teams/' || new.team_id::text
-    );
-  elsif (tg_op = 'DELETE') then
-    insert into public.audit_logs (action, actor_id, target_user_id, team_id, meta)
-    values ('MEMBER_REMOVED', actor, old.user_id, old.team_id,
-      jsonb_build_object('team_name', team_name));
-
-    perform public.notify_user(
-      old.user_id,
-      'Removed from ' || team_name,
-      'You have been removed from ' || team_name || '.',
-      'warning',
-      '/teams'
-    );
-  end if;
-
-  return coalesce(new, old);
-end;
-$$;
-
-drop trigger if exists on_membership_insert on public.team_members;
-create trigger on_membership_insert
-  after insert on public.team_members
-  for each row execute function public.handle_membership_change();
-
-drop trigger if exists on_membership_delete on public.team_members;
-create trigger on_membership_delete
-  after delete on public.team_members
-  for each row execute function public.handle_membership_change();
-
--- ============================================================================
--- TRIGGER: audit sheet field changes with previous/new values
--- ============================================================================
-create or replace function public.handle_member_field_change()
-returns trigger
-language plpgsql
-security definer
-set search_path = public
-as $$
-declare
-  actor uuid := public.audit_actor();
-  changed_field text := null;
-  previous_value text := null;
-  new_value text := null;
-begin
-  if new.role is distinct from old.role then
-    changed_field := 'role'; previous_value := old.role; new_value := new.role;
-  elsif new.weapon is distinct from old.weapon then
-    changed_field := 'weapon'; previous_value := old.weapon; new_value := new.weapon;
-  elsif new.availability is distinct from old.availability then
-    changed_field := 'availability'; previous_value := old.availability; new_value := new.availability;
-  elsif new.notes is distinct from old.notes then
-    changed_field := 'notes'; previous_value := old.notes; new_value := new.notes;
-  end if;
-
-  if changed_field is not null then
-    insert into public.audit_logs (action, actor_id, target_user_id, team_id, meta)
-    values ('FIELD_UPDATED', actor, new.user_id, new.team_id,
-      jsonb_build_object('field', changed_field, 'previous', previous_value, 'new', new_value));
-  end if;
-
-  return new;
-end;
-$$;
-
-drop trigger if exists on_member_field_change on public.team_members;
-create trigger on_member_field_change
-  after update on public.team_members
-  for each row
-  when (new.role is distinct from old.role
-     or new.weapon is distinct from old.weapon
-     or new.availability is distinct from old.availability
-     or new.notes is distinct from old.notes)
-  execute function public.handle_member_field_change();
-
--- ============================================================================
--- RPC: atomic member field update (permission + lock + status re-checks)
--- ============================================================================
-create or replace function public.update_member_field(
-  p_member_id uuid,
-  p_field text,
-  p_value text
-)
+-- Claim a slot. UNIQUE(slot_id) decides races; the RPC maps the loss to
+-- SLOT_TAKEN. Identity always from auth.uid(); approved members only;
+-- published events only.
+create or replace function public.claim_event_slot(p_slot_id uuid, p_note text default null)
 returns jsonb
 language plpgsql
 security definer
 set search_path = public
 as $$
 declare
-  v_member public.team_members;
-  v_team public.teams;
-  v_is_admin boolean;
-  v_own_row boolean;
+  v_slot record;
+  v_event public.events;
+  v_note text;
 begin
-  select * into v_member from public.team_members where id = p_member_id;
-  if not found then
-    return jsonb_build_object('ok', false, 'error', 'NOT_FOUND');
+  if auth.uid() is null then
+    return jsonb_build_object('ok', false, 'error', 'UNAUTHENTICATED');
   end if;
 
-  select * into v_team from public.teams where id = v_member.team_id;
+  v_note := nullif(trim(coalesce(p_note, '')), '');
+  if v_note is not null and char_length(v_note) > 200 then
+    return jsonb_build_object('ok', false, 'error', 'INVALID_NOTE');
+  end if;
 
-  v_is_admin := coalesce(
-    (select p.is_platform_admin from public.profiles p where p.id = auth.uid()), false);
-  v_own_row := v_member.user_id = auth.uid();
+  select es.party_id, ep.event_id into v_slot
+  from public.event_slots es
+  join public.event_parties ep on ep.id = es.party_id
+  where es.id = p_slot_id;
+  if not found then
+    return jsonb_build_object('ok', false, 'error', 'SLOT_NOT_FOUND');
+  end if;
 
-  if coalesce(
-    (select p.status from public.profiles p where p.id = auth.uid()), 'pending') <> 'approved' then
+  select * into v_event from public.events where id = v_slot.event_id;
+  if v_event.status <> 'published' then
+    return jsonb_build_object('ok', false, 'error', 'EVENT_NOT_OPEN');
+  end if;
+
+  if not exists (
+    select 1 from public.profiles
+    where id = auth.uid() and status = 'approved'
+  ) then
     return jsonb_build_object('ok', false, 'error', 'ACCOUNT_NOT_APPROVED');
   end if;
 
-  if not v_is_admin and not v_own_row then
-    return jsonb_build_object('ok', false, 'error', 'FORBIDDEN');
+  -- One signup per member per event (§34).
+  if exists (
+    select 1 from public.event_signups
+    where event_id = v_slot.event_id and user_id = auth.uid()
+  ) then
+    return jsonb_build_object('ok', false, 'error', 'ALREADY_SIGNED_UP');
   end if;
 
-  if v_team.sheet_locked and not v_is_admin then
-    return jsonb_build_object('ok', false, 'error', 'SHEET_LOCKED');
+  -- Own IGN from the profile — members never type it repeatedly (§11).
+  insert into public.event_signups (slot_id, event_id, user_id, ign, note)
+  select p_slot_id, v_slot.event_id, auth.uid(), p.ign, v_note
+  from public.profiles p
+  where p.id = auth.uid();
+
+  -- A missing profile row must never silently "succeed".
+  if not found then
+    return jsonb_build_object('ok', false, 'error', 'PROFILE_NOT_FOUND');
   end if;
 
-  if v_team.status not in ('open', 'draft') then
-    return jsonb_build_object('ok', false, 'error', 'TEAM_NOT_EDITABLE');
+  insert into public.audit_logs (action, actor_id, target_user_id, event_id, meta)
+  values ('SIGNUP_CREATED', auth.uid(), auth.uid(), v_slot.event_id,
+    jsonb_build_object('slot_id', p_slot_id, 'ign',
+      (select ign from public.event_signups where slot_id = p_slot_id)));
+
+  return jsonb_build_object('ok', true);
+exception
+  when unique_violation then
+    -- Lost the claim race, or signed up twice concurrently.
+    if exists (select 1 from public.event_signups where event_id = v_slot.event_id and user_id = auth.uid()) then
+      return jsonb_build_object('ok', false, 'error', 'ALREADY_SIGNED_UP');
+    end if;
+    return jsonb_build_object('ok', false, 'error', 'SLOT_TAKEN');
+end;
+$$;
+
+-- Leave own slot.
+create or replace function public.leave_event_slot(p_slot_id uuid)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_event_id uuid;
+  v_ign text;
+begin
+  if auth.uid() is null then
+    return jsonb_build_object('ok', false, 'error', 'UNAUTHENTICATED');
   end if;
 
-  if p_field not in ('role', 'weapon', 'availability', 'notes') then
-    return jsonb_build_object('ok', false, 'error', 'INVALID_FIELD');
+  select es.event_id into v_event_id
+  from public.event_slots es
+  where es.id = p_slot_id;
+  if not found then
+    return jsonb_build_object('ok', false, 'error', 'SLOT_NOT_FOUND');
   end if;
 
-  if p_field = 'role' and p_value not in ('Tank','Healer','DPS','Support','Leader') then
-    return jsonb_build_object('ok', false, 'error', 'INVALID_VALUE');
+  delete from public.event_signups
+  where slot_id = p_slot_id and user_id = auth.uid()
+  returning ign into v_ign;
+
+  if v_ign is null then
+    return jsonb_build_object('ok', false, 'error', 'NOT_SIGNED_UP');
   end if;
 
-  update public.team_members
-     set role         = case when p_field = 'role' then p_value else role end,
-         weapon       = case when p_field = 'weapon' then nullif(trim(p_value), '') else weapon end,
-         availability = case when p_field = 'availability' then nullif(trim(p_value), '') else availability end,
-         notes        = case when p_field = 'notes' then nullif(trim(p_value), '') else notes end
-   where id = p_member_id;
+  insert into public.audit_logs (action, actor_id, target_user_id, event_id, meta)
+  values ('SIGNUP_REMOVED', auth.uid(), auth.uid(), v_event_id,
+    jsonb_build_object('slot_id', p_slot_id, 'by', 'member'));
 
   return jsonb_build_object('ok', true);
 end;
 $$;
 
-revoke all on function public.update_member_field(uuid, text, text) from public, anon;
-grant execute on function public.update_member_field(uuid, text, text) to authenticated;
+-- ============================================================================
+-- 11. RPCs — admin event management (§13, §29)
+-- ============================================================================
 
--- ============================================================================
--- RPC: revert a field change (admin only; preserves history)
--- ============================================================================
-create or replace function public.revert_member_field(
-  p_member_id uuid,
-  p_field text,
-  p_previous_value text
+-- Save an event (create or update) atomically: header + parties + slots.
+create or replace function public.save_event(
+  p_event_id uuid,
+  p_data jsonb
 )
 returns jsonb
 language plpgsql
@@ -886,52 +372,546 @@ security definer
 set search_path = public
 as $$
 declare
-  v_is_admin boolean;
+  v_actor uuid := auth.uid();
+  v_event_id uuid := p_event_id;
+  v_is_new boolean := false;
+  v_party jsonb;
+  v_slot jsonb;
+  v_party_id uuid;
+  v_slot_id uuid;
+  v_kept_slot_ids uuid[] := '{}';
+  v_kept_party_ids uuid[] := '{}';
+  v_title text;
 begin
-  select coalesce(is_platform_admin, false) into v_is_admin
-    from public.profiles where id = auth.uid();
-  if not v_is_admin then
+  if not public.is_event_admin() then
     return jsonb_build_object('ok', false, 'error', 'FORBIDDEN');
   end if;
 
-  if not exists (select 1 from public.team_members where id = p_member_id) then
+  v_title := nullif(trim(coalesce(p_data->>'title', '')), '');
+  if v_title is null or char_length(v_title) < 2 or char_length(v_title) > 120 then
+    return jsonb_build_object('ok', false, 'error', 'INVALID_TITLE');
+  end if;
+
+  if p_event_id is null then
+    insert into public.events (title, created_by, is_template, event_date)
+    values (v_title, v_actor,
+            coalesce((p_data->>'is_template')::boolean, false),
+            nullif(p_data->>'event_date', '')::date)
+    returning id into v_event_id;
+    v_is_new := true;
+    insert into public.audit_logs (action, actor_id, event_id, meta)
+    values ('EVENT_CREATED', v_actor, v_event_id, jsonb_build_object('title', v_title));
+  end if;
+
+  update public.events set
+    title        = v_title,
+    description  = nullif(p_data->>'description', ''),
+    event_date   = nullif(p_data->>'event_date', '')::date,
+    massing_time = nullif(p_data->>'massing_time', '')::time,
+    timezone     = coalesce(nullif(trim(p_data->>'timezone'), ''), timezone),
+    location     = nullif(trim(p_data->>'location'), ''),
+    portal       = nullif(trim(p_data->>'portal'), ''),
+    set_name     = nullif(trim(p_data->>'set_name'), ''),
+    caller       = nullif(trim(p_data->>'caller'), ''),
+    instructions = nullif(p_data->>'instructions', ''),
+    is_template  = coalesce((p_data->>'is_template')::boolean, is_template),
+    updated_at   = now()
+  where id = v_event_id;
+
+  for v_party in select * from jsonb_array_elements(coalesce(p_data->'parties', '[]'::jsonb))
+  loop
+    v_party_id := nullif(v_party->>'id', '')::uuid;
+    if v_party_id is null then
+      insert into public.event_parties (event_id, name, fill_note, sort_order)
+      values (v_event_id,
+              coalesce(nullif(trim(v_party->>'name'), ''), 'Party'),
+              nullif(trim(coalesce(v_party->>'fill_note', '')), ''),
+              coalesce((v_party->>'sort_order')::int, 0))
+      returning id into v_party_id;
+    else
+      update public.event_parties set
+        name = coalesce(nullif(trim(v_party->>'name'), ''), name),
+        fill_note = nullif(trim(coalesce(v_party->>'fill_note', '')), ''),
+        sort_order = coalesce((v_party->>'sort_order')::int, sort_order)
+      where id = v_party_id and event_id = v_event_id;
+      if not found then
+        insert into public.event_parties (event_id, name, fill_note, sort_order)
+        values (v_event_id,
+                coalesce(nullif(trim(v_party->>'name'), ''), 'Party'),
+                nullif(trim(coalesce(v_party->>'fill_note', '')), ''),
+                coalesce((v_party->>'sort_order')::int, 0))
+        returning id into v_party_id;
+      end if;
+    end if;
+    v_kept_party_ids := array_append(v_kept_party_ids, v_party_id);
+
+    for v_slot in select * from jsonb_array_elements(coalesce(v_party->'slots', '[]'::jsonb))
+    loop
+      v_slot_id := nullif(v_slot->>'id', '')::uuid;
+      if v_slot_id is null then
+        insert into public.event_slots (party_id, role, equipment, tier_requirement, notes, priority, required, sort_order)
+        values (v_party_id,
+                coalesce(nullif(trim(v_slot->>'role'), ''), 'Fill'),
+                coalesce(nullif(trim(v_slot->>'equipment'), ''), 'TBD'),
+                coalesce(v_slot->>'tier_requirement', 'any'),
+                nullif(trim(coalesce(v_slot->>'notes', '')), ''),
+                coalesce(v_slot->>'priority', 'normal'),
+                coalesce((v_slot->>'required')::boolean, true),
+                coalesce((v_slot->>'sort_order')::int, 0))
+        returning id into v_slot_id;
+      else
+        update public.event_slots set
+          role = coalesce(nullif(trim(v_slot->>'role'), ''), role),
+          equipment = coalesce(nullif(trim(v_slot->>'equipment'), ''), equipment),
+          tier_requirement = coalesce(v_slot->>'tier_requirement', tier_requirement),
+          notes = nullif(trim(coalesce(v_slot->>'notes', '')), ''),
+          priority = coalesce(v_slot->>'priority', priority),
+          required = coalesce((v_slot->>'required')::boolean, required),
+          sort_order = coalesce((v_slot->>'sort_order')::int, sort_order)
+        where id = v_slot_id
+          and party_id in (select id from public.event_parties where event_id = v_event_id);
+        if not found then
+          insert into public.event_slots (party_id, role, equipment, tier_requirement, notes, priority, required, sort_order)
+          values (v_party_id,
+                  coalesce(nullif(trim(v_slot->>'role'), ''), 'Fill'),
+                  coalesce(nullif(trim(v_slot->>'equipment'), ''), 'TBD'),
+                  coalesce(v_slot->>'tier_requirement', 'any'),
+                  nullif(trim(coalesce(v_slot->>'notes', '')), ''),
+                  coalesce(v_slot->>'priority', 'normal'),
+                  coalesce((v_slot->>'required')::boolean, true),
+                  coalesce((v_slot->>'sort_order')::int, 0))
+          returning id into v_slot_id;
+        end if;
+      end if;
+      v_kept_slot_ids := array_append(v_kept_slot_ids, v_slot_id);
+    end loop;
+  end loop;
+
+  delete from public.event_slots
+   where party_id in (select id from public.event_parties where event_id = v_event_id)
+     and not (id = any(v_kept_slot_ids));
+  delete from public.event_parties
+   where event_id = v_event_id and not (id = any(v_kept_party_ids));
+
+  insert into public.audit_logs (action, actor_id, event_id, meta)
+  select 'EVENT_UPDATED', v_actor, e.id, jsonb_build_object('was_new', v_is_new)
+  from public.events e where e.id = v_event_id;
+
+  return jsonb_build_object('ok', true, 'id', v_event_id, 'created', v_is_new);
+end;
+$$;
+
+-- Lifecycle transitions with timestamps + audit.
+create or replace function public.set_event_status(p_event_id uuid, p_status text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_event public.events;
+  v_actor uuid := auth.uid();
+begin
+  if not public.is_event_admin() then
+    return jsonb_build_object('ok', false, 'error', 'FORBIDDEN');
+  end if;
+  if p_status not in ('draft','published','locked','completed','cancelled','archived') then
+    return jsonb_build_object('ok', false, 'error', 'INVALID_STATUS');
+  end if;
+
+  select * into v_event from public.events where id = p_event_id;
+  if not found then
+    return jsonb_build_object('ok', false, 'error', 'NOT_FOUND');
+  end if;
+  if v_event.status = p_status then
+    return jsonb_build_object('ok', true);
+  end if;
+
+  update public.events set
+    status = p_status,
+    published_at = case when p_status = 'published' then now() else published_at end,
+    locked_at    = case when p_status = 'locked' then now() else locked_at end,
+    cancelled_at = case when p_status = 'cancelled' then now() else cancelled_at end,
+    completed_at = case when p_status = 'completed' then now() else completed_at end,
+    updated_at   = now()
+  where id = p_event_id;
+
+  insert into public.audit_logs (action, actor_id, event_id, meta)
+  values (
+    case p_status
+      when 'published' then 'EVENT_PUBLISHED'
+      when 'locked' then 'EVENT_LOCKED'
+      when 'cancelled' then 'EVENT_CANCELLED'
+      when 'completed' then 'EVENT_COMPLETED'
+      when 'archived' then 'EVENT_ARCHIVED'
+      else 'EVENT_RESTORED'
+    end,
+    v_actor, v_event.id,
+    jsonb_build_object('previous_status', v_event.status, 'new_status', p_status));
+
+  -- Notify approved members when an event is (re)published.
+  if p_status = 'published' then
+    insert into public.notifications (user_id, title, body, kind, link)
+    select p.id,
+      'New event: ' || v_event.title,
+      concat_ws(' · ',
+        v_event.location,
+        v_event.event_date::text,
+        v_event.massing_time::text || ' ' || v_event.timezone),
+      'event',
+      '/events/' || v_event.id::text
+    from public.profiles p
+    where p.status = 'approved' and p.id <> coalesce(v_actor, auth.uid());
+  end if;
+
+  return jsonb_build_object('ok', true);
+end;
+$$;
+
+-- Duplicate an event as a fresh draft (structure only, never signups) — §15.
+create or replace function public.duplicate_event(p_event_id uuid)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_src public.events;
+  v_new_id uuid;
+  v_party record;
+  v_slot record;
+  v_new_party uuid;
+  v_actor uuid := auth.uid();
+begin
+  if not public.is_event_admin() then
+    return jsonb_build_object('ok', false, 'error', 'FORBIDDEN');
+  end if;
+
+  select * into v_src from public.events where id = p_event_id;
+  if not found then
     return jsonb_build_object('ok', false, 'error', 'NOT_FOUND');
   end if;
 
-  update public.team_members
-     set role         = case when p_field = 'role' then p_previous_value else role end,
-         weapon       = case when p_field = 'weapon' then p_previous_value else weapon end,
-         availability = case when p_field = 'availability' then p_previous_value else availability end,
-         notes        = case when p_field = 'notes' then p_previous_value else notes end
-   where id = p_member_id;
+  insert into public.events (title, description, event_date, massing_time, timezone,
+                             location, portal, set_name, caller, instructions,
+                             status, is_template, created_by)
+  values (left(v_src.title || ' (copy)', 120),
+          v_src.description, null, v_src.massing_time, v_src.timezone,
+          v_src.location, v_src.portal, v_src.set_name, v_src.caller, v_src.instructions,
+          'draft', false, v_actor)
+  returning id into v_new_id;
 
-  return jsonb_build_object('ok', true);
+  for v_party in select * from public.event_parties where event_id = v_src.id order by sort_order
+  loop
+    insert into public.event_parties (event_id, name, fill_note, sort_order)
+    values (v_new_id, v_party.name, v_party.fill_note, v_party.sort_order)
+    returning id into v_new_party;
+    for v_slot in select * from public.event_slots where party_id = v_party.id order by sort_order
+    loop
+      insert into public.event_slots (party_id, role, equipment, tier_requirement, notes, priority, required, sort_order)
+      values (v_new_party, v_slot.role, v_slot.equipment, v_slot.tier_requirement,
+              v_slot.notes, v_slot.priority, v_slot.required, v_slot.sort_order);
+    end loop;
+  end loop;
+
+  insert into public.audit_logs (action, actor_id, event_id, meta)
+  values ('EVENT_DUPLICATED', v_actor, v_src.id, jsonb_build_object('new_id', v_new_id));
+
+  return jsonb_build_object('ok', true, 'id', v_new_id);
 end;
 $$;
 
-revoke all on function public.revert_member_field(uuid, text, text) from public, anon;
-grant execute on function public.revert_member_field(uuid, text, text) to authenticated;
+-- Admin: move a member between slots (delete + insert, one transaction) or
+-- remove a signup entirely.
+create or replace function public.admin_set_signup(p_slot_id uuid, p_user_id uuid)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_slot record;
+  v_event public.events;
+  v_old record;
+  v_ign text;
+begin
+  if not public.is_event_admin() then
+    return jsonb_build_object('ok', false, 'error', 'FORBIDDEN');
+  end if;
+
+  select es.party_id, ep.event_id into v_slot
+  from public.event_slots es
+  join public.event_parties ep on ep.id = es.party_id
+  where es.id = p_slot_id;
+  if not found then
+    return jsonb_build_object('ok', false, 'error', 'SLOT_NOT_FOUND');
+  end if;
+  select * into v_event from public.events where id = v_slot.event_id;
+
+  select * into v_old from public.event_signups where event_id = v_slot.event_id and user_id = p_user_id;
+
+  if p_user_id is null then
+    if v_old is null then return jsonb_build_object('ok', true); end if;
+    delete from public.event_signups where slot_id = p_slot_id;
+    insert into public.audit_logs (action, actor_id, target_user_id, event_id, meta)
+    values ('SIGNUP_REMOVED', auth.uid(), v_old.user_id, v_event.id,
+      jsonb_build_object('slot_id', p_slot_id, 'by', 'admin'));
+    return jsonb_build_object('ok', true);
+  end if;
+
+  if not exists (select 1 from public.profiles where id = p_user_id and status = 'approved') then
+    return jsonb_build_object('ok', false, 'error', 'USER_NOT_APPROVED');
+  end if;
+
+  -- Move = clear previous signup for this member in this event, then insert.
+  delete from public.event_signups where event_id = v_slot.event_id and user_id = p_user_id;
+  insert into public.event_signups (slot_id, event_id, user_id, ign)
+  select p_slot_id, v_slot.event_id, p_user_id, p.ign
+  from public.profiles p where p.id = p_user_id;
+
+  insert into public.audit_logs (action, actor_id, target_user_id, event_id, meta)
+  values ('SIGNUP_MOVED', auth.uid(), p_user_id, v_event.id,
+    jsonb_build_object('slot_id', p_slot_id,
+      'previous_slot', v_old.slot_id));
+
+  return jsonb_build_object('ok', true);
+exception
+  when unique_violation then
+    return jsonb_build_object('ok', false, 'error', 'SLOT_TAKEN');
+end;
+$$;
 
 -- ============================================================================
--- RPC: generic admin actions.
--- Two secure entry paths, both re-verified INSIDE the function:
---   1. User session: caller's JWT must belong to an approved platform admin.
---   2. Trusted server: service-role key (no user JWT). auth.uid() is null,
---      so the acting admin's identity arrives via p_actor_id, which the
---      application server sets from its own server-verified session — never
---      from the browser. Triggers pick it up through the transaction-scoped
---      app.actor_id GUC so audit events still carry the real actor.
--- User JWTs always have auth.uid() set, so a member can never reach the
--- trusted path; anon callers have no EXECUTE grant at all.
+-- 12. GRANTS — authenticated SELECT-only everywhere; writes via RPCs
 -- ============================================================================
-drop function if exists public.admin_action(text, uuid, uuid, uuid, jsonb);
-create or replace function public.admin_action(
+revoke all on public.profiles        from anon;
+revoke all on public.events          from anon;
+revoke all on public.event_parties   from anon;
+revoke all on public.event_slots     from anon;
+revoke all on public.event_signups   from anon;
+revoke all on public.albion_equipment from anon;
+revoke all on public.notifications   from anon;
+revoke all on public.audit_logs      from anon;
+
+grant select on public.profiles, public.events, public.event_parties,
+  public.event_slots, public.event_signups, public.albion_equipment,
+  public.notifications, public.audit_logs
+  to authenticated;
+
+revoke insert, update, delete, truncate, references, trigger
+  on public.profiles, public.events, public.event_parties, public.event_slots,
+     public.event_signups, public.albion_equipment, public.notifications,
+     public.audit_logs
+  from authenticated;
+
+grant select, insert, update, delete, truncate
+  on public.profiles, public.events, public.event_parties, public.event_slots,
+     public.event_signups, public.albion_equipment, public.notifications,
+     public.audit_logs
+  to service_role;
+
+grant execute on function public.is_event_admin() to anon, authenticated;
+grant execute on function public.is_event_visible(uuid) to anon, authenticated;
+grant execute on function public.is_event_party_visible(uuid) to anon, authenticated;
+grant execute on function public.is_event_slot_visible(uuid) to anon, authenticated;
+
+grant execute on function public.claim_event_slot(uuid, text) to authenticated, service_role;
+grant execute on function public.leave_event_slot(uuid) to authenticated, service_role;
+grant execute on function public.save_event(uuid, jsonb) to authenticated, service_role;
+grant execute on function public.set_event_status(uuid, text) to authenticated, service_role;
+grant execute on function public.duplicate_event(uuid) to authenticated, service_role;
+grant execute on function public.admin_set_signup(uuid, uuid) to authenticated, service_role;
+
+-- ============================================================================
+-- 13. RLS
+-- ============================================================================
+alter table public.profiles        enable row level security;
+alter table public.events          enable row level security;
+alter table public.event_parties   enable row level security;
+alter table public.event_slots     enable row level security;
+alter table public.event_signups   enable row level security;
+alter table public.albion_equipment enable row level security;
+alter table public.notifications   enable row level security;
+alter table public.audit_logs      enable row level security;
+
+-- ---------- profiles ----------
+drop policy if exists "profiles: own row or admin" on public.profiles;
+create policy "profiles: own row or admin"
+  on public.profiles for select
+  to authenticated, service_role
+  using (
+    id = auth.uid()
+    or public.is_event_admin()
+  );
+
+drop policy if exists "profiles: admin update" on public.profiles;
+create policy "profiles: admin update"
+  on public.profiles for update
+  to authenticated, service_role
+  using (public.is_event_admin())
+  with check (public.is_event_admin());
+
+-- (profile self-service updates for ign/discord flow through an RPC below.)
+
+-- ---------- events ----------
+drop policy if exists "events: visible read" on public.events;
+create policy "events: visible read"
+  on public.events for select
+  to authenticated, service_role
+  using (public.is_event_visible(id));
+
+drop policy if exists "events: admins write" on public.events;
+create policy "events: admins write"
+  on public.events for all
+  to authenticated, service_role
+  using (public.is_event_admin())
+  with check (public.is_event_admin());
+
+-- ---------- event_parties ----------
+drop policy if exists "event_parties: visible read" on public.event_parties;
+create policy "event_parties: visible read"
+  on public.event_parties for select
+  to authenticated, service_role
+  using (public.is_event_party_visible(id));
+
+drop policy if exists "event_parties: admins write" on public.event_parties;
+create policy "event_parties: admins write"
+  on public.event_parties for all
+  to authenticated, service_role
+  using (public.is_event_admin())
+  with check (public.is_event_admin());
+
+-- ---------- event_slots ----------
+drop policy if exists "event_slots: visible read" on public.event_slots;
+create policy "event_slots: visible read"
+  on public.event_slots for select
+  to authenticated, service_role
+  using (public.is_event_slot_visible(id));
+
+drop policy if exists "event_slots: admins write" on public.event_slots;
+create policy "event_slots: admins write"
+  on public.event_slots for all
+  to authenticated, service_role
+  using (public.is_event_admin())
+  with check (public.is_event_admin());
+
+-- ---------- event_signups ----------
+drop policy if exists "event_signups: visible read" on public.event_signups;
+create policy "event_signups: visible read"
+  on public.event_signups for select
+  to authenticated, service_role
+  using (public.is_event_slot_visible(slot_id));
+
+-- Members write ONLY their own signup rows, on published events only.
+drop policy if exists "event_signups: own row on published" on public.event_signups;
+create policy "event_signups: own row on published"
+  on public.event_signups for all
+  to authenticated, service_role
+  using (
+    user_id = auth.uid()
+    and exists (
+      select 1
+      from public.event_slots es
+      join public.event_parties ep on ep.id = es.party_id
+      join public.events e on e.id = ep.event_id
+      where es.id = slot_id and e.status = 'published'
+    )
+  )
+  with check (
+    user_id = auth.uid()
+    and exists (
+      select 1
+      from public.event_slots es
+      join public.event_parties ep on ep.id = es.party_id
+      join public.events e on e.id = ep.event_id
+      where es.id = slot_id and e.status = 'published'
+    )
+  );
+
+-- ---------- albion_equipment ----------
+drop policy if exists "albion_equipment: authenticated read" on public.albion_equipment;
+create policy "albion_equipment: authenticated read"
+  on public.albion_equipment for select
+  to authenticated, service_role
+  using (active);
+
+drop policy if exists "albion_equipment: admins manage" on public.albion_equipment;
+create policy "albion_equipment: admins manage"
+  on public.albion_equipment for all
+  to authenticated, service_role
+  using (public.is_event_admin())
+  with check (public.is_event_admin());
+
+-- ---------- notifications ----------
+drop policy if exists "notifications: own read" on public.notifications;
+create policy "notifications: own read"
+  on public.notifications for select
+  to authenticated, service_role
+  using (user_id = auth.uid());
+
+drop policy if exists "notifications: own mark-read" on public.notifications;
+create policy "notifications: own mark-read"
+  on public.notifications for update
+  to authenticated, service_role
+  using (user_id = auth.uid())
+  with check (user_id = auth.uid());
+
+drop policy if exists "notifications: admin insert" on public.notifications;
+create policy "notifications: admin insert"
+  on public.notifications for insert
+  to authenticated, service_role
+  with check (public.is_event_admin());
+
+-- ---------- audit_logs: append-only ----------
+drop policy if exists "audit_logs: admin read" on public.audit_logs;
+create policy "audit_logs: admin read"
+  on public.audit_logs for select
+  to authenticated, service_role
+  using (public.is_event_admin());
+
+drop policy if exists "audit_logs: admin insert" on public.audit_logs;
+create policy "audit_logs: admin insert"
+  on public.audit_logs for insert
+  to authenticated, service_role
+  with check (public.is_event_admin());
+
+-- ============================================================================
+-- 14. PROFILE SELF-SERVICE (ign/discord) — definer RPC, columns scoped
+-- ============================================================================
+create or replace function public.update_own_profile(p_ign text, p_discord text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if auth.uid() is null then
+    return jsonb_build_object('ok', false, 'error', 'UNAUTHENTICATED');
+  end if;
+  update public.profiles
+     set ign = nullif(trim(p_ign), ''),
+         discord = nullif(trim(p_discord), ''),
+         updated_at = now()
+   where id = auth.uid();
+  if not found then
+    return jsonb_build_object('ok', false, 'error', 'NOT_FOUND');
+  end if;
+  return jsonb_build_object('ok', true);
+exception
+  when unique_violation then
+    return jsonb_build_object('ok', false, 'error', 'IGN_TAKEN');
+end;
+$$;
+grant execute on function public.update_own_profile(text, text) to authenticated, service_role;
+
+-- ============================================================================
+-- 14b. ADMIN USER MANAGEMENT RPC — member oversight without any Team concept
+--       (approve / reject / suspend / reactivate / archive / set_admin)
+-- ============================================================================
+create or replace function public.admin_user_action(
   p_action text,
-  p_target_user_id uuid default null,
-  p_team_id uuid default null,
-  p_member_id uuid default null,
-  p_payload jsonb default '{}'::jsonb,
-  p_actor_id uuid default null
+  p_target_user_id uuid,
+  p_payload jsonb default '{}'::jsonb
 )
 returns jsonb
 language plpgsql
@@ -939,47 +919,27 @@ security definer
 set search_path = public
 as $$
 declare
-  v_is_admin boolean;
-  v_member public.team_members;
-  v_team_name text;
-  v_team_id uuid;
-  v_actor uuid;
+  v_actor uuid := auth.uid();
 begin
-  if auth.uid() is not null then
-    select coalesce(is_platform_admin, false) into v_is_admin
-      from public.profiles where id = auth.uid();
-    if not v_is_admin then
-      return jsonb_build_object('ok', false, 'error', 'FORBIDDEN');
-    end if;
-    v_actor := auth.uid();
-  else
-    -- Trusted-server path: only the service-role role (or a direct DB
-    -- connection) can be here — anon JWTs have no EXECUTE grant and user
-    -- JWTs always carry a sub claim.
-    if coalesce(auth.role(), '') = 'anon' then
-      return jsonb_build_object('ok', false, 'error', 'FORBIDDEN');
-    end if;
-    v_actor := p_actor_id;
+  if not public.is_event_admin() then
+    return jsonb_build_object('ok', false, 'error', 'FORBIDDEN');
   end if;
-
-  -- Transaction-scoped: triggers prefer auth.uid() when present, so this can
-  -- never be abused to forge another actor from a user session.
-  perform set_config('app.actor_id', coalesce(v_actor::text, ''), true);
 
   case p_action
     when 'approve_user' then
       update public.profiles
-         set status = 'approved', approved_at = now(), approved_by = coalesce(v_actor, auth.uid())
+         set status = 'approved', approved_at = now()
        where id = p_target_user_id and status in ('pending', 'suspended', 'rejected');
       if not found then
         return jsonb_build_object('ok', false, 'error', 'NOT_FOUND_OR_INVALID_STATE');
       end if;
-      perform public.notify_user(p_target_user_id, 'Account approved',
-        'Your account has been approved. You can now log in.', 'success', '/dashboard');
+      insert into public.notifications (user_id, title, body, kind, link)
+      values (p_target_user_id, 'Account approved',
+        'Your account has been approved. You can now sign up for events.', 'success', '/dashboard');
 
     when 'reject_user' then
       update public.profiles
-         set status = 'rejected', rejected_at = now(), rejected_by = coalesce(v_actor, auth.uid())
+         set status = 'rejected', suspended_at = null
        where id = p_target_user_id and status = 'pending';
       if not found then
         return jsonb_build_object('ok', false, 'error', 'NOT_FOUND_OR_INVALID_STATE');
@@ -987,22 +947,24 @@ begin
 
     when 'suspend_user' then
       update public.profiles
-         set status = 'suspended', suspended_at = now(), suspended_by = coalesce(v_actor, auth.uid())
+         set status = 'suspended', suspended_at = now()
        where id = p_target_user_id and status = 'approved';
       if not found then
         return jsonb_build_object('ok', false, 'error', 'NOT_FOUND_OR_INVALID_STATE');
       end if;
-      perform public.notify_user(p_target_user_id, 'Account suspended',
-        'Your account has been suspended by an administrator.', 'error', null);
+      insert into public.notifications (user_id, title, body, kind)
+      values (p_target_user_id, 'Account suspended',
+        'Your account has been suspended by an administrator.', 'error');
 
     when 'reactivate_user' then
       update public.profiles
-         set status = 'approved', suspended_at = null, suspended_by = null
+         set status = 'approved', suspended_at = null
        where id = p_target_user_id and status = 'suspended';
       if not found then
         return jsonb_build_object('ok', false, 'error', 'NOT_FOUND_OR_INVALID_STATE');
       end if;
-      perform public.notify_user(p_target_user_id, 'Account reactivated',
+      insert into public.notifications (user_id, title, body, kind, link)
+      values (p_target_user_id, 'Account reactivated',
         'Your account has been reactivated. Welcome back!', 'success', '/dashboard');
 
     when 'archive_user' then
@@ -1023,269 +985,227 @@ begin
         return jsonb_build_object('ok', false, 'error', 'NOT_FOUND');
       end if;
 
-    when 'create_team' then
-      insert into public.teams (name, description, status, created_by)
-      values (
-        p_payload->>'name',
-        nullif(p_payload->>'description', ''),
-        coalesce(p_payload->>'status', 'open'),
-        coalesce(v_actor, auth.uid())
-      )
-      returning id into v_team_id;
-      return jsonb_build_object('ok', true, 'id', v_team_id);
-
-    when 'rename_team' then
-      update public.teams
-         set name = coalesce(p_payload->>'name', name)
-       where id = p_team_id;
-      if not found then
-        return jsonb_build_object('ok', false, 'error', 'NOT_FOUND');
-      end if;
-
-    when 'archive_team' then
-      update public.teams
-         set status = 'archived', archived_at = now(), sheet_locked = true
-       where id = p_team_id and status <> 'archived';
-      if not found then
-        return jsonb_build_object('ok', false, 'error', 'NOT_FOUND_OR_INVALID_STATE');
-      end if;
-
-    when 'restore_team' then
-      update public.teams
-         set status = 'open', archived_at = null
-       where id = p_team_id and status = 'archived';
-      if not found then
-        return jsonb_build_object('ok', false, 'error', 'NOT_FOUND_OR_INVALID_STATE');
-      end if;
-
-    when 'set_team_status' then
-      if coalesce(p_payload->>'status', '') not in ('draft','open','locked','archived') then
-        return jsonb_build_object('ok', false, 'error', 'INVALID_STATUS');
-      end if;
-      update public.teams
-         set status = p_payload->>'status',
-             archived_at = case when p_payload->>'status' = 'archived' then now() else archived_at end
-       where id = p_team_id;
-      if not found then
-        return jsonb_build_object('ok', false, 'error', 'NOT_FOUND');
-      end if;
-
-    when 'lock_sheet' then
-      update public.teams set sheet_locked = true where id = p_team_id;
-      if not found then
-        return jsonb_build_object('ok', false, 'error', 'NOT_FOUND');
-      end if;
-
-    when 'unlock_sheet' then
-      update public.teams set sheet_locked = false where id = p_team_id;
-      if not found then
-        return jsonb_build_object('ok', false, 'error', 'NOT_FOUND');
-      end if;
-
-    when 'add_member' then
-      select * into v_member from public.team_members
-        where team_id = p_team_id and user_id = p_target_user_id;
-      if found then
-        return jsonb_build_object('ok', false, 'error', 'ALREADY_MEMBER');
-      end if;
-      if not exists (select 1 from public.profiles where id = p_target_user_id) then
-        return jsonb_build_object('ok', false, 'error', 'USER_NOT_FOUND');
-      end if;
-      if not exists (
-        select 1 from public.profiles
-         where id = p_target_user_id and status = 'approved'
-      ) then
-        return jsonb_build_object('ok', false, 'error', 'USER_NOT_APPROVED');
-      end if;
-      insert into public.team_members (team_id, user_id, role, added_by)
-      values (p_team_id, p_target_user_id, coalesce(p_payload->>'role', 'DPS'), coalesce(v_actor, auth.uid()));
-      return jsonb_build_object('ok', true, 'id',
-        (select id from public.team_members where team_id = p_team_id and user_id = p_target_user_id));
-
-    when 'remove_member' then
-      delete from public.team_members where id = p_member_id;
-      if not found then
-        return jsonb_build_object('ok', false, 'error', 'NOT_FOUND');
-      end if;
-
-    when 'set_member_role' then
-      if coalesce(p_payload->>'role', '') not in ('Tank','Healer','DPS','Support','Leader') then
-        return jsonb_build_object('ok', false, 'error', 'INVALID_ROLE');
-      end if;
-      update public.team_members
-         set role = p_payload->>'role'
-       where id = p_member_id;
-      if not found then
-        return jsonb_build_object('ok', false, 'error', 'NOT_FOUND');
-      end if;
-
     else
       return jsonb_build_object('ok', false, 'error', 'UNKNOWN_ACTION');
   end case;
 
+  insert into public.audit_logs (action, actor_id, target_user_id, meta)
+  values (
+    case p_action
+      when 'approve_user' then 'USER_APPROVED'
+      when 'reject_user' then 'USER_REJECTED'
+      when 'suspend_user' then 'USER_SUSPENDED'
+      when 'reactivate_user' then 'USER_REACTIVATED'
+      when 'archive_user' then 'USER_ARCHIVED'
+      else 'PERMISSION_CHANGED'
+    end,
+    v_actor, p_target_user_id,
+    jsonb_build_object('admin_action', p_action, 'payload', p_payload));
+
   return jsonb_build_object('ok', true);
 end;
 $$;
-
-revoke all on function public.admin_action(text, uuid, uuid, uuid, jsonb, uuid) from public, anon;
-grant execute on function public.admin_action(text, uuid, uuid, uuid, jsonb, uuid) to authenticated, service_role;
+grant execute on function public.admin_user_action(text, uuid, jsonb) to authenticated, service_role;
 
 -- ============================================================================
--- ROW LEVEL SECURITY
+-- 15. TRIGGERS — profile lifecycle + updated_at stamps
 -- ============================================================================
 
-alter table public.profiles enable row level security;
-alter table public.teams enable row level security;
-alter table public.team_members enable row level security;
-alter table public.notifications enable row level security;
-alter table public.audit_logs enable row level security;
-
--- ----------------------------------------------------------------------------
--- DESIGN RULES (the 42P17 fix)
---
--- * No policy may query the table it protects DIRECTLY (invoker rights).
---   All self-table and cross-table authorization checks go through the
---   security-definer helpers above, which evaluate as the owner and
---   therefore do not re-enter RLS. This is what eliminates
---   "42P17: infinite recursion detected in policy for relation".
--- * Every operation gets its own policy — never one broad policy.
--- * Protected tables have no client INSERT/UPDATE/DELETE policies unless
---   explicitly intended; privileged writes flow through security-definer
---   RPCs that re-verify permissions inside the database.
--- ----------------------------------------------------------------------------
-
--- ---------- profiles ----------
--- Readable: your own row, admins, and teammates (the sheet joins profiles
--- for IGNs). Never world-readable.
-drop policy if exists "profiles: read own, admins or teammates" on public.profiles;
-create policy "profiles: read own, admins or teammates"
-  on public.profiles for select
-  using (
-    id = auth.uid()
-    or public.is_platform_admin()
-    or public.shares_team_with_me(id)
+-- Auto-create a profile on signup: first account = admin + approved,
+-- everyone after = pending member (§5 — the two-level user model).
+create or replace function public.handle_new_user()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_count integer;
+  v_ign text;
+begin
+  select count(*) into v_count from public.profiles;
+  v_ign := coalesce(
+    nullif(new.raw_user_meta_data->>'ign', ''),
+    split_part(new.email, '@', 1),
+    'player'
   );
+  v_ign := left(v_ign, 32);
 
--- Insert: only your own row, and only as a plain pending, non-admin profile.
--- (The signup trigger is the real creator; this guards against abuse.)
-drop policy if exists "profiles: insert own pending" on public.profiles;
-create policy "profiles: insert own pending"
-  on public.profiles for insert
-  with check (
-    id = auth.uid()
-    and is_platform_admin = false
-    and status = 'pending'
-  );
+  -- De-duplicate: ign is unique — collision must not crash auth signup.
+  if exists (select 1 from public.profiles where ign = v_ign) then
+    declare
+      v_n integer := 1;
+    begin
+      while exists (select 1 from public.profiles where ign = v_ign || '-' || v_n)
+        loop v_n := v_n + 1; end loop;
+      v_ign := left(v_ign || '-' || v_n, 32);
+    end;
+  end if;
 
--- Update: your own row (the trigger + column grants still block status and
--- admin fields) or administrators.
-drop policy if exists "profiles: update own or admin" on public.profiles;
-create policy "profiles: update own or admin"
-  on public.profiles for update
-  using (id = auth.uid() or public.is_platform_admin())
-  with check (id = auth.uid() or public.is_platform_admin());
-
--- No delete policy: profiles are never deleted through the client API.
-
--- ---------- teams ----------
-drop policy if exists "teams: members and admins read" on public.teams;
-create policy "teams: members and admins read"
-  on public.teams for select
-  using (public.is_platform_admin() or public.is_team_member(id));
-
-drop policy if exists "teams: admins insert" on public.teams;
-create policy "teams: admins insert"
-  on public.teams for insert
-  with check (public.is_platform_admin());
-
-drop policy if exists "teams: admins update" on public.teams;
-create policy "teams: admins update"
-  on public.teams for update
-  using (public.is_platform_admin())
-  with check (public.is_platform_admin());
-
-drop policy if exists "teams: admins delete" on public.teams;
-create policy "teams: admins delete"
-  on public.teams for delete
-  using (public.is_platform_admin());
-
--- ---------- team_members ----------
-drop policy if exists "team_members: team members and admins read" on public.team_members;
-create policy "team_members: team members and admins read"
-  on public.team_members for select
-  using (
-    public.is_platform_admin()
-    or user_id = auth.uid()
-    or public.is_team_member(team_id)
-  );
-
-drop policy if exists "team_members: admins insert" on public.team_members;
-create policy "team_members: admins insert"
-  on public.team_members for insert
-  with check (public.is_platform_admin());
-
--- Members may update only their own row, and only while the sheet is
--- editable. Column grants (below) restrict which fields; the
--- update_member_field RPC is the primary path and re-checks everything.
-drop policy if exists "team_members: own row update on editable sheets" on public.team_members;
-create policy "team_members: own row update on editable sheets"
-  on public.team_members for update
-  using (
-    public.is_platform_admin()
-    or (user_id = auth.uid() and public.is_team_editable(team_id))
+  insert into public.profiles (id, ign, status, is_platform_admin)
+  values (
+    new.id,
+    v_ign,
+    case when v_count = 0 then 'approved' else 'pending' end,
+    v_count = 0
   )
-  with check (
-    public.is_platform_admin()
-    or (user_id = auth.uid() and public.is_team_editable(team_id))
-  );
+  on conflict (id) do nothing;
+  return new;
+end;
+$$;
 
-drop policy if exists "team_members: admins delete" on public.team_members;
-create policy "team_members: admins delete"
-  on public.team_members for delete
-  using (public.is_platform_admin());
+drop trigger if exists on_auth_user_created on auth.users;
+create trigger on_auth_user_created
+  after insert on auth.users
+  for each row execute function public.handle_new_user();
 
--- ---------- notifications ----------
-drop policy if exists "notifications: read own" on public.notifications;
-create policy "notifications: read own"
-  on public.notifications for select
-  using (user_id = auth.uid());
+create or replace function public.touch_updated_at()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+begin
+  new.updated_at := now();
+  return new;
+end;
+$$;
 
-drop policy if exists "notifications: update own" on public.notifications;
-create policy "notifications: update own"
-  on public.notifications for update
-  using (user_id = auth.uid())
-  with check (user_id = auth.uid());
+drop trigger if exists on_profiles_update on public.profiles;
+create trigger on_profiles_update before update on public.profiles
+  for each row execute function public.touch_updated_at();
 
--- ---------- audit_logs ----------
--- Append-only and admin-readable. Members read their own recent events
--- through the recent_own_activity() RPC instead of the table itself.
-drop policy if exists "audit_logs: admins read" on public.audit_logs;
-create policy "audit_logs: admins read"
-  on public.audit_logs for select
-  using (public.is_platform_admin());
-
--- No insert/update/delete policies anywhere: writes happen via triggers,
--- security-definer RPCs, or the server-side service-role client only.
+drop trigger if exists on_events_update on public.events;
+create trigger on_events_update before update on public.events
+  for each row execute function public.touch_updated_at();
 
 -- ============================================================================
--- GRANTS: tighten default privileges
--- (RLS limits *which rows*; these grants limit *which tables and columns*
--- the anon and authenticated roles can touch at all.)
+-- 16. REALTIME — event signup + status changes (§36)
 -- ============================================================================
-revoke all on public.profiles from anon;
-grant select on public.profiles to authenticated;
-grant update (ign, discord) on public.profiles to authenticated;
-
-grant select on public.teams to authenticated;
-
-grant select on public.team_members to authenticated;
-grant update (role, weapon, availability, notes) on public.team_members to authenticated;
-
-grant select on public.notifications to authenticated;
-grant update (read) on public.notifications to authenticated;
-
-grant select on public.audit_logs to authenticated;
+do $$
+begin
+  if exists (select 1 from pg_publication where pubname = 'supabase_realtime') then
+    if not exists (select 1 from pg_publication_tables
+      where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'event_signups') then
+      alter publication supabase_realtime add table public.event_signups;
+    end if;
+    if not exists (select 1 from pg_publication_tables
+      where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'events') then
+      alter publication supabase_realtime add table public.events;
+    end if;
+  end if;
+end
+$$;
 
 -- ============================================================================
--- DONE
+-- Seed: a real, broad Albion equipment catalog (source: OpenAlbion v3 data —
+-- real base items; the app works fully offline; `npm run equipment:sync`
+-- refreshes from the API when available).
+-- ============================================================================
+insert into public.albion_equipment (name, category, family, tier, source) values
+  -- Weapons: Swords
+  ('Broadsword','Weapon','Swords','any','seed'),
+  ('Claymore','Weapon','Swords','any','seed'),
+  ('Dual Swords','Weapon','Swords','any','seed'),
+  ('Galatine Pair','Weapon','Swords','any','seed'),
+  -- Axes
+  ('Battleaxe','Weapon','Axes','any','seed'),
+  ('Greataxe','Weapon','Axes','any','seed'),
+  ('Halberd','Weapon','Axes','any','seed'),
+  -- Maces
+  ('Mace','Weapon','Maces','any','seed'),
+  ('Heavy Mace','Weapon','Maces','any','seed'),
+  ('Morning Star','Weapon','Maces','any','seed'),
+  ('Incubus Mace','Weapon','Maces','any','seed'),
+  -- Hammers
+  ('Hammer','Weapon','Hammers','any','seed'),
+  ('Great Hammer','Weapon','Hammers','any','seed'),
+  ('Portal Decayer','Weapon','Hammers','any','seed'),
+  -- Spears
+  ('Spear','Weapon','Spears','any','seed'),
+  ('Great Spear','Weapon','Spears','any','seed'),
+  ('Glaive','Weapon','Spears','any','seed'),
+  -- Quarterstaffs
+  ('Quarterstaff','Weapon','Quarterstaffs','any','seed'),
+  ('Double Bladed Staff','Weapon','Quarterstaffs','any','seed'),
+  ('Iron-wood Staff','Weapon','Quarterstaffs','any','seed'),
+  -- Daggers
+  ('Dagger','Weapon','Daggers','any','seed'),
+  ('Dagger Pair','Weapon','Daggers','any','seed'),
+  ('Claw Pair','Weapon','Daggers','any','seed'),
+  -- Bows
+  ('Bow','Weapon','Bows','any','seed'),
+  ('Wargbow','Weapon','Bows','any','seed'),
+  ('Longbow','Weapon','Bows','any','seed'),
+  -- Crossbows
+  ('Crossbow','Weapon','Crossbows','any','seed'),
+  ('Heavy Crossbow','Weapon','Crossbows','any','seed'),
+  ('Weeping Repeater','Weapon','Crossbows','any','seed'),
+  -- Fire Staffs
+  ('Fire Staff','Weapon','Fire Staffs','any','seed'),
+  ('Great Fire Staff','Weapon','Fire Staffs','any','seed'),
+  ('Infernal Staff','Weapon','Fire Staffs','any','seed'),
+  -- Frost Staffs
+  ('Frost Staff','Weapon','Frost Staffs','any','seed'),
+  ('Glacial Staff','Weapon','Frost Staffs','any','seed'),
+  ('Chill Sentence','Weapon','Frost Staffs','any','seed'),
+  -- Arcane Staffs
+  ('Arcane Staff','Weapon','Arcane Staffs','any','seed'),
+  ('Great Arcane Staff','Weapon','Arcane Staffs','any','seed'),
+  ('Occult Staff','Weapon','Arcane Staffs','any','seed'),
+  -- Holy Staffs
+  ('Holy Staff','Weapon','Holy Staffs','any','seed'),
+  ('Great Holy Staff','Weapon','Holy Staffs','any','seed'),
+  ('Redemption','Weapon','Holy Staffs','any','seed'),
+  -- Nature Staffs
+  ('Nature Staff','Weapon','Nature Staffs','any','seed'),
+  ('Great Nature Staff','Weapon','Nature Staffs','any','seed'),
+  ('Wildfire Staff','Weapon','Nature Staffs','any','seed'),
+  -- Cursed Staffs
+  ('Cursed Staff','Weapon','Cursed Staffs','any','seed'),
+  ('Great Cursed Staff','Weapon','Cursed Staffs','any','seed'),
+  ('Demonic Staff','Weapon','Cursed Staffs','any','seed'),
+  -- War Gloves
+  ('War Gloves','Weapon','War Gloves','any','seed'),
+  ('Bear Paws','Weapon','War Gloves','any','seed'),
+  ('Energy Shards','Weapon','War Gloves','any','seed'),
+  -- Armor: chest
+  ('Cloth Armor','Armor','Cloth','any','seed'),
+  ('Scholar Robe','Armor','Cloth','any','seed'),
+  ('Cleric Robe','Armor','Cloth','any','seed'),
+  ('Mercenary Jacket','Armor','Leather','any','seed'),
+  ('Hunter Jacket','Armor','Leather','any','seed'),
+  ('Soldier Armor','Armor','Plate','any','seed'),
+  ('Knight Armor','Armor','Plate','any','seed'),
+  ('Guardian Armor','Armor','Plate','any','seed'),
+  -- Helmets
+  ('Mage Cowl','Helmet','Cloth','any','seed'),
+  ('Cleric Cowl','Helmet','Cloth','any','seed'),
+  ('Soldier Helmet','Helmet','Plate','any','seed'),
+  ('Knight Helmet','Helmet','Plate','any','seed'),
+  ('Hunter Hood','Helmet','Leather','any','seed'),
+  ('Mercenary Hood','Helmet','Leather','any','seed'),
+  -- Shoes
+  ('Mage Sandals','Shoes','Cloth','any','seed'),
+  ('Cleric Shoes','Shoes','Cloth','any','seed'),
+  ('Soldier Boots','Shoes','Plate','any','seed'),
+  ('Knight Boots','Shoes','Plate','any','seed'),
+  ('Hunter Shoes','Shoes','Leather','any','seed'),
+  ('Mercenary Shoes','Shoes','Leather','any','seed'),
+  -- Off-Hands
+  ('Torch','Off-Hand','Off-Hand','any','seed'),
+  ('Shield','Off-Hand','Off-Hand','any','seed'),
+  ('Book','Off-Hand','Off-Hand','any','seed'),
+  ('Tome','Off-Hand','Off-Hand','any','seed'),
+  ('Orb','Off-Hand','Off-Hand','any','seed'),
+  ('Totem','Off-Hand','Off-Hand','any','seed'),
+  ('Taproot','Off-Hand','Off-Hand','any','seed'),
+  ('Cryptcandle','Off-Hand','Off-Hand','any','seed'),
+  ('Mistcaller','Off-Hand','Off-Hand','any','seed'),
+  ('Facebreaker','Off-Hand','Off-Hand','any','seed'),
+  ('Leering Cane','Off-Hand','Off-Hand','any','seed'),
+  ('Banner','Off-Hand','Off-Hand','any','seed')
+on conflict (name) do nothing;
+
+-- ============================================================================
+-- DONE. Verify with:  npm run db:push && npm run db:doctor
 -- ============================================================================

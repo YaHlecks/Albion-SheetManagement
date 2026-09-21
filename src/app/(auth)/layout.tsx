@@ -11,25 +11,25 @@ export default function AuthLayout({ children }: { children: React.ReactNode }) 
           <Link href="/" className="flex items-center gap-2.5">
             <Logo />
             <span className="font-display text-lg font-bold tracking-tight">
-              Albion <span className="text-brand">Team Sheets</span>
+              Albion <span className="text-brand">Event Sheets</span>
             </span>
           </Link>
           <div className="max-w-md">
             <h2 className="font-display text-3xl font-bold leading-tight tracking-tight">
-              Your rosters, <span className="text-brand">under control</span>.
+              Your masses, <span className="text-brand">under control</span>.
             </h2>
             <ul className="mt-8 space-y-4 text-sm text-muted">
               <li className="flex items-start gap-3">
                 <Users size={18} className="mt-0.5 shrink-0 text-brand" />
-                Team-based access — members only see their own teams.
+                Members see published events and sign into the slot that fits their build.
               </li>
               <li className="flex items-start gap-3">
                 <Eye size={18} className="mt-0.5 shrink-0 text-brand" />
-                Every change tracked: who, what, when, previous value included.
+                Live sheets: claims appear for everyone instantly.
               </li>
               <li className="flex items-start gap-3">
                 <ShieldCheck size={18} className="mt-0.5 shrink-0 text-brand" />
-                Approvals, moderation and one-click change reverts for admins.
+                Approvals, moderation and a full audit trail for admins.
               </li>
             </ul>
           </div>
@@ -43,7 +43,7 @@ export default function AuthLayout({ children }: { children: React.ReactNode }) 
           <Link href="/" className="mb-8 flex items-center justify-center gap-2.5 lg:hidden">
             <Logo />
             <span className="font-display text-lg font-bold tracking-tight">
-              Albion <span className="text-brand">Team Sheets</span>
+              Albion <span className="text-brand">Event Sheets</span>
             </span>
           </Link>
           {children}

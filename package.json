@@ -1,5 +1,5 @@
 {
-  "name": "albion-team-sheets",
+  "name": "albion-event-sheets",
   "version": "1.0.0",
   "private": true,
   "description": "Albion Online team sheet management platform",
@@ -11,8 +11,8 @@
     "test": "vitest run",
     "db:push": "node scripts/db-push.mjs",
     "db:bootstrap": "node scripts/db-bootstrap.mjs",
+    "db:reset": "node scripts/db-reset.mjs",
     "db:doctor": "node scripts/db-doctor.mjs",
-    "equipment:sync": "node scripts/equipment-sync.mjs",
     "lint": "tsc --noEmit"
   },
   "dependencies": {
