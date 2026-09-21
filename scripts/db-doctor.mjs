@@ -105,9 +105,48 @@ async function main() {
     report(present.has(t), `${t} exists`);
   }
   // Legacy tables must be GONE.
-  for (const t of ["teams", "team_members", "mass_sheets", "mass_parties", "mass_slots", "mass_assignments"]) {
+  for (const t of ["teams", "team_members", "mass_sheets", "mass_parties", "mass_slots", "mass_assignments", "sheets", "sheet_entries", "friendships", "messages"]) {
     report(!present.has(t), `legacy table ${t} removed`);
   }
+
+  // Required profile columns (auth/profile contract — 42703 broke admin access
+  // when these were missing).
+  const { rows: colRows } = await client.query(
+    `select column_name from information_schema.columns
+     where table_schema = 'public' and table_name = 'profiles'`,
+  );
+  const cols = new Set(colRows.map((r) => r.column_name));
+  for (const c of ["last_login_at", "approved_at", "suspended_at", "ign", "discord", "status", "is_platform_admin"]) {
+    report(cols.has(c), `profiles.${c} exists`, cols.has(c) ? "ok" : "MISSING → 42703 on profile loads");
+  }
+
+  // Legacy functions must be GONE (old Team/mass architecture).
+  const LEGACY_FNS = [
+    "create_team", "admin_action", "handle_membership_change", "log_audit",
+    "is_team_member", "is_team_editable", "shares_team_with_me",
+    "claim_mass_slot", "unclaim_mass_slot", "save_mass_sheet",
+    "set_mass_sheet_status", "duplicate_mass_sheet", "admin_set_slot_assignment",
+    "recent_own_activity",
+  ];
+  const { rows: fnRows } = await client.query(
+    `select p.proname from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+     where n.nspname = 'public'`,
+  );
+  const fnsPresent = new Set(fnRows.map((r) => r.proname));
+  for (const f of LEGACY_FNS) {
+    report(!fnsPresent.has(f), `legacy function ${f} removed`);
+  }
+
+  // No function name may have multiple signatures — duplicate RPCs with
+  // confusing overloads are how "which one runs?" bugs are born.
+  const { rows: dupRows } = await client.query(
+    `select p.proname, count(*)::int as variants
+     from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+     where n.nspname = 'public'
+     group by p.proname having count(*) > 1`,
+  );
+  report(dupRows.length === 0, "no overloaded/duplicate function names in public",
+    dupRows.map((r) => `${r.proname}(${r.variants})`).join(", ") || undefined);
 
   // ------------------------------------------------------------------
   // 2. Grants
@@ -163,6 +202,10 @@ async function main() {
     "admin_set_signup(uuid,uuid)",
     "admin_user_action(text,uuid,jsonb)",
     "update_own_profile(text,text)",
+    "ensure_profile()",
+    "touch_login()",
+    "check_ign_available(text)",
+    "claim_first_admin()",
   ];
   for (const f of fns) {
     const r = await probe("authenticated", `select public.${f};`);
@@ -239,12 +282,45 @@ async function main() {
         await client.query(`delete from public.events where id = $1`, [eventId]);
       }
     }
+
+    // Auth/profile contract (the login page's exact sequence), all rolled back.
+    const ep = await probe("authenticated", `select public.ensure_profile() as res;`, claims);
+    report(ep.ok && ep.rows?.[0]?.res?.ok === true,
+      "ensure_profile RPC succeeds (existing profile left intact)",
+      ep.ok ? `created=${ep.rows?.[0]?.res?.created}` : `${ep.code}: ${ep.message}`);
+    const tl = await probe("authenticated", `select public.touch_login();`, claims);
+    report(tl.ok, "touch_login RPC succeeds (last_login_at + USER_LOGIN audit)", tl.ok ? "ok" : `${tl.code}: ${tl.message}`);
+    const cf = await probe("authenticated", `select public.claim_first_admin() as res;`, claims);
+    report(cf.ok && cf.rows?.[0]?.res?.ok === true && cf.rows?.[0]?.res?.promoted === false,
+      "claim_first_admin is a no-op for an existing admin (idempotent)",
+      cf.ok ? "promoted=false" : JSON.stringify(cf.rows?.[0]?.res ?? cf.message));
   } else {
     console.error("  • No admin profile exists yet — register the first account to complete admin-session probes.");
   }
 
+  // Registration-page probe: anon must be able to check IGN availability.
+  const ign = await probe("anon", `select public.check_ign_available('__doctor_probe__') as res;`);
+  report(ign.ok && typeof ign.rows?.[0]?.res === "boolean",
+    "check_ign_available RPC callable by anon (registration flow)", ign.ok ? "ok" : `${ign.code}: ${ign.message}`);
+
   // ------------------------------------------------------------------
-  // 6. Recursion guard (42P17)
+  // Realtime publication — only the tables the app streams (§15).
+  // ------------------------------------------------------------------
+  console.error("\nRealtime:");
+  const { rows: pubRows } = await client.query(
+    `select tablename from pg_publication_tables
+     where pubname = 'supabase_realtime' and schemaname = 'public'`,
+  );
+  const pub = new Set(pubRows.map((r) => r.tablename));
+  for (const t of ["event_signups", "events", "notifications"]) {
+    report(pub.has(t), `${t} in supabase_realtime publication`, pub.has(t) ? "ok" : "MISSING → no live updates");
+  }
+  const unexpected = [...pub].filter((t) => !TABLES.includes(t));
+  report(unexpected.length === 0, "no obsolete tables in realtime publication",
+    unexpected.length ? unexpected.join(", ") : undefined);
+
+  // ------------------------------------------------------------------
+  // 7. Recursion guard (42P17)
   // ------------------------------------------------------------------
   console.error("\nRecursion check (42P17):");
   const { rows: polRows } = await client.query(

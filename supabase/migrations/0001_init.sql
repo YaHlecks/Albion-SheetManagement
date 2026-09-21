@@ -1096,115 +1096,424 @@ begin
 end
 $$;
 
--- ============================================================================
--- Seed: a real, broad Albion equipment catalog (source: OpenAlbion v3 data —
--- real base items; the app works fully offline; `npm run equipment:sync`
--- refreshes from the API when available).
--- ============================================================================
-insert into public.albion_equipment (name, category, family, tier, source) values
-  -- Weapons: Swords
-  ('Broadsword','Weapon','Swords','any','seed'),
-  ('Claymore','Weapon','Swords','any','seed'),
-  ('Dual Swords','Weapon','Swords','any','seed'),
-  ('Galatine Pair','Weapon','Swords','any','seed'),
-  -- Axes
-  ('Battleaxe','Weapon','Axes','any','seed'),
-  ('Greataxe','Weapon','Axes','any','seed'),
-  ('Halberd','Weapon','Axes','any','seed'),
-  -- Maces
-  ('Mace','Weapon','Maces','any','seed'),
-  ('Heavy Mace','Weapon','Maces','any','seed'),
-  ('Morning Star','Weapon','Maces','any','seed'),
-  ('Incubus Mace','Weapon','Maces','any','seed'),
-  -- Hammers
-  ('Hammer','Weapon','Hammers','any','seed'),
-  ('Great Hammer','Weapon','Hammers','any','seed'),
-  ('Portal Decayer','Weapon','Hammers','any','seed'),
-  -- Spears
-  ('Spear','Weapon','Spears','any','seed'),
-  ('Great Spear','Weapon','Spears','any','seed'),
-  ('Glaive','Weapon','Spears','any','seed'),
-  -- Quarterstaffs
-  ('Quarterstaff','Weapon','Quarterstaffs','any','seed'),
-  ('Double Bladed Staff','Weapon','Quarterstaffs','any','seed'),
-  ('Iron-wood Staff','Weapon','Quarterstaffs','any','seed'),
-  -- Daggers
-  ('Dagger','Weapon','Daggers','any','seed'),
-  ('Dagger Pair','Weapon','Daggers','any','seed'),
-  ('Claw Pair','Weapon','Daggers','any','seed'),
-  -- Bows
-  ('Bow','Weapon','Bows','any','seed'),
-  ('Wargbow','Weapon','Bows','any','seed'),
-  ('Longbow','Weapon','Bows','any','seed'),
-  -- Crossbows
-  ('Crossbow','Weapon','Crossbows','any','seed'),
-  ('Heavy Crossbow','Weapon','Crossbows','any','seed'),
-  ('Weeping Repeater','Weapon','Crossbows','any','seed'),
-  -- Fire Staffs
-  ('Fire Staff','Weapon','Fire Staffs','any','seed'),
-  ('Great Fire Staff','Weapon','Fire Staffs','any','seed'),
-  ('Infernal Staff','Weapon','Fire Staffs','any','seed'),
-  -- Frost Staffs
-  ('Frost Staff','Weapon','Frost Staffs','any','seed'),
-  ('Glacial Staff','Weapon','Frost Staffs','any','seed'),
-  ('Chill Sentence','Weapon','Frost Staffs','any','seed'),
-  -- Arcane Staffs
-  ('Arcane Staff','Weapon','Arcane Staffs','any','seed'),
-  ('Great Arcane Staff','Weapon','Arcane Staffs','any','seed'),
-  ('Occult Staff','Weapon','Arcane Staffs','any','seed'),
-  -- Holy Staffs
-  ('Holy Staff','Weapon','Holy Staffs','any','seed'),
-  ('Great Holy Staff','Weapon','Holy Staffs','any','seed'),
-  ('Redemption','Weapon','Holy Staffs','any','seed'),
-  -- Nature Staffs
-  ('Nature Staff','Weapon','Nature Staffs','any','seed'),
-  ('Great Nature Staff','Weapon','Nature Staffs','any','seed'),
-  ('Wildfire Staff','Weapon','Nature Staffs','any','seed'),
-  -- Cursed Staffs
-  ('Cursed Staff','Weapon','Cursed Staffs','any','seed'),
-  ('Great Cursed Staff','Weapon','Cursed Staffs','any','seed'),
-  ('Demonic Staff','Weapon','Cursed Staffs','any','seed'),
-  -- War Gloves
-  ('War Gloves','Weapon','War Gloves','any','seed'),
-  ('Bear Paws','Weapon','War Gloves','any','seed'),
-  ('Energy Shards','Weapon','War Gloves','any','seed'),
-  -- Armor: chest
-  ('Cloth Armor','Armor','Cloth','any','seed'),
-  ('Scholar Robe','Armor','Cloth','any','seed'),
-  ('Cleric Robe','Armor','Cloth','any','seed'),
-  ('Mercenary Jacket','Armor','Leather','any','seed'),
-  ('Hunter Jacket','Armor','Leather','any','seed'),
-  ('Soldier Armor','Armor','Plate','any','seed'),
-  ('Knight Armor','Armor','Plate','any','seed'),
-  ('Guardian Armor','Armor','Plate','any','seed'),
-  -- Helmets
-  ('Mage Cowl','Helmet','Cloth','any','seed'),
-  ('Cleric Cowl','Helmet','Cloth','any','seed'),
-  ('Soldier Helmet','Helmet','Plate','any','seed'),
-  ('Knight Helmet','Helmet','Plate','any','seed'),
-  ('Hunter Hood','Helmet','Leather','any','seed'),
-  ('Mercenary Hood','Helmet','Leather','any','seed'),
-  -- Shoes
-  ('Mage Sandals','Shoes','Cloth','any','seed'),
-  ('Cleric Shoes','Shoes','Cloth','any','seed'),
-  ('Soldier Boots','Shoes','Plate','any','seed'),
-  ('Knight Boots','Shoes','Plate','any','seed'),
-  ('Hunter Shoes','Shoes','Leather','any','seed'),
-  ('Mercenary Shoes','Shoes','Leather','any','seed'),
-  -- Off-Hands
-  ('Torch','Off-Hand','Off-Hand','any','seed'),
-  ('Shield','Off-Hand','Off-Hand','any','seed'),
-  ('Book','Off-Hand','Off-Hand','any','seed'),
-  ('Tome','Off-Hand','Off-Hand','any','seed'),
-  ('Orb','Off-Hand','Off-Hand','any','seed'),
-  ('Totem','Off-Hand','Off-Hand','any','seed'),
-  ('Taproot','Off-Hand','Off-Hand','any','seed'),
-  ('Cryptcandle','Off-Hand','Off-Hand','any','seed'),
-  ('Mistcaller','Off-Hand','Off-Hand','any','seed'),
-  ('Facebreaker','Off-Hand','Off-Hand','any','seed'),
-  ('Leering Cane','Off-Hand','Off-Hand','any','seed'),
-  ('Banner','Off-Hand','Off-Hand','any','seed')
-on conflict (name) do nothing;
+
+-- ============================================================
+-- ALBION ONLINE EQUIPMENT SEED
+-- ============================================================
+-- This is a normalized equipment-family seed.
+-- tier = 'any' means the application does not restrict the
+-- equipment selector to a specific tier.
+--
+-- IMPORTANT:
+-- This is a practical catalog for the event/signup system,
+-- not a replacement for a complete official item database.
+-- ============================================================
+
+INSERT INTO public.albion_equipment
+    (name, category, family, tier, source)
+VALUES
+
+-- ============================================================
+-- WEAPONS — SWORDS
+-- ============================================================
+
+('Broadsword','Weapon','Swords','any','seed'),
+('Claymore','Weapon','Swords','any','seed'),
+('Dual Swords','Weapon','Swords','any','seed'),
+('Carving Sword','Weapon','Swords','any','seed'),
+('Clarent Blade','Weapon','Swords','any','seed'),
+('Kingmaker','Weapon','Swords','any','seed'),
+('Infinity Blade','Weapon','Swords','any','seed'),
+('Galatine Pair','Weapon','Swords','any','seed'),
+
+
+-- ============================================================
+-- WEAPONS — AXES
+-- ============================================================
+
+('Battleaxe','Weapon','Axes','any','seed'),
+('Greataxe','Weapon','Axes','any','seed'),
+('Halberd','Weapon','Axes','any','seed'),
+('Infernal Scythe','Weapon','Axes','any','seed'),
+('Carrioncaller','Weapon','Axes','any','seed'),
+('Realmbreaker','Weapon','Axes','any','seed'),
+('Crystal Reaper','Weapon','Axes','any','seed'),
+('Bear Paws','Weapon','Axes','any','seed'),
+
+
+-- ============================================================
+-- WEAPONS — MACES
+-- ============================================================
+
+('Mace','Weapon','Maces','any','seed'),
+('Heavy Mace','Weapon','Maces','any','seed'),
+('Morning Star','Weapon','Maces','any','seed'),
+('Incubus Mace','Weapon','Maces','any','seed'),
+('Camlann Mace','Weapon','Maces','any','seed'),
+('Bedrock Mace','Weapon','Maces','any','seed'),
+('Oathkeepers','Weapon','Maces','any','seed'),
+('Dreadstorm Monarch','Weapon','Maces','any','seed'),
+
+
+-- ============================================================
+-- WEAPONS — HAMMERS
+-- ============================================================
+
+('Hammer','Weapon','Hammers','any','seed'),
+('Great Hammer','Weapon','Hammers','any','seed'),
+('Polehammer','Weapon','Hammers','any','seed'),
+('Tombhammer','Weapon','Hammers','any','seed'),
+('Grovekeeper','Weapon','Hammers','any','seed'),
+('Forge Hammers','Weapon','Hammers','any','seed'),
+('Hand of Justice','Weapon','Hammers','any','seed'),
+('Truebolt Hammer','Weapon','Hammers','any','seed'),
+
+
+-- ============================================================
+-- WEAPONS — SPEARS
+-- ============================================================
+
+('Spear','Weapon','Spears','any','seed'),
+('Pike','Weapon','Spears','any','seed'),
+('Glaive','Weapon','Spears','any','seed'),
+('Heron Spear','Weapon','Spears','any','seed'),
+('Trinity Spear','Weapon','Spears','any','seed'),
+('Spirithunter','Weapon','Spears','any','seed'),
+('Rift Glaive','Weapon','Spears','any','seed'),
+('Daybreaker','Weapon','Spears','any','seed'),
+
+
+-- ============================================================
+-- WEAPONS — QUARTERSTAFFS
+-- ============================================================
+
+('Quarterstaff','Weapon','Quarterstaffs','any','seed'),
+('Double-Bladed Staff','Weapon','Quarterstaffs','any','seed'),
+('Black Monk Stave','Weapon','Quarterstaffs','any','seed'),
+('Staff of Balance','Weapon','Quarterstaffs','any','seed'),
+('Ironclad Staff','Weapon','Quarterstaffs','any','seed'),
+('Soulscythe','Weapon','Quarterstaffs','any','seed'),
+('Phantom Twinblade','Weapon','Quarterstaffs','any','seed'),
+('Grailseeker','Weapon','Quarterstaffs','any','seed'),
+
+
+-- ============================================================
+-- WEAPONS — DAGGERS
+-- ============================================================
+
+('Dagger','Weapon','Daggers','any','seed'),
+('Dagger Pair','Weapon','Daggers','any','seed'),
+('Claws','Weapon','Daggers','any','seed'),
+('Bloodletter','Weapon','Daggers','any','seed'),
+('Deathgivers','Weapon','Daggers','any','seed'),
+('Black Hands','Weapon','Daggers','any','seed'),
+('Twin Slayers','Weapon','Daggers','any','seed'),
+('Bridled Fury','Weapon','Daggers','any','seed'),
+
+
+-- ============================================================
+-- WEAPONS — BOWS
+-- ============================================================
+
+('Bow','Weapon','Bows','any','seed'),
+('Warbow','Weapon','Bows','any','seed'),
+('Longbow','Weapon','Bows','any','seed'),
+('Whispering Bow','Weapon','Bows','any','seed'),
+('Bow of Badon','Weapon','Bows','any','seed'),
+('Wailing Bow','Weapon','Bows','any','seed'),
+('Mistpiercer','Weapon','Bows','any','seed'),
+('Skystrider Bow','Weapon','Bows','any','seed'),
+
+
+-- ============================================================
+-- WEAPONS — CROSSBOWS
+-- ============================================================
+
+('Crossbow','Weapon','Crossbows','any','seed'),
+('Light Crossbow','Weapon','Crossbows','any','seed'),
+('Heavy Crossbow','Weapon','Crossbows','any','seed'),
+('Weeping Repeater','Weapon','Crossbows','any','seed'),
+('Siegebow','Weapon','Crossbows','any','seed'),
+('Boltcasters','Weapon','Crossbows','any','seed'),
+('Arclight Blasters','Weapon','Crossbows','any','seed'),
+('Energy Shaper','Weapon','Crossbows','any','seed'),
+
+
+-- ============================================================
+-- WEAPONS — FIRE STAFFS
+-- ============================================================
+
+('Fire Staff','Weapon','Fire Staffs','any','seed'),
+('Great Fire Staff','Weapon','Fire Staffs','any','seed'),
+('Infernal Staff','Weapon','Fire Staffs','any','seed'),
+('Wildfire Staff','Weapon','Fire Staffs','any','seed'),
+('Blazing Staff','Weapon','Fire Staffs','any','seed'),
+('Brimstone Staff','Weapon','Fire Staffs','any','seed'),
+('Flamewalker Staff','Weapon','Fire Staffs','any','seed'),
+('Dawnsong','Weapon','Fire Staffs','any','seed'),
+
+
+-- ============================================================
+-- WEAPONS — FROST STAFFS
+-- ============================================================
+
+('Frost Staff','Weapon','Frost Staffs','any','seed'),
+('Great Frost Staff','Weapon','Frost Staffs','any','seed'),
+('Glacial Staff','Weapon','Frost Staffs','any','seed'),
+('Permafrost Prism','Weapon','Frost Staffs','any','seed'),
+('Hoarfrost Staff','Weapon','Frost Staffs','any','seed'),
+('Icicle Staff','Weapon','Frost Staffs','any','seed'),
+('Chillhowl','Weapon','Frost Staffs','any','seed'),
+('Arctic Staff','Weapon','Frost Staffs','any','seed'),
+
+
+-- ============================================================
+-- WEAPONS — ARCANE STAFFS
+-- ============================================================
+
+('Arcane Staff','Weapon','Arcane Staffs','any','seed'),
+('Great Arcane Staff','Weapon','Arcane Staffs','any','seed'),
+('Occult Staff','Weapon','Arcane Staffs','any','seed'),
+('Malevolent Locus','Weapon','Arcane Staffs','any','seed'),
+('Witchwork Staff','Weapon','Arcane Staffs','any','seed'),
+('Enigmatic Staff','Weapon','Arcane Staffs','any','seed'),
+('Astral Staff','Weapon','Arcane Staffs','any','seed'),
+('Evensong','Weapon','Arcane Staffs','any','seed'),
+
+
+-- ============================================================
+-- WEAPONS — HOLY STAFFS
+-- ============================================================
+
+('Holy Staff','Weapon','Holy Staffs','any','seed'),
+('Great Holy Staff','Weapon','Holy Staffs','any','seed'),
+('Divine Staff','Weapon','Holy Staffs','any','seed'),
+('Fallen Staff','Weapon','Holy Staffs','any','seed'),
+('Hallowfall','Weapon','Holy Staffs','any','seed'),
+('Lifetouch Staff','Weapon','Holy Staffs','any','seed'),
+('Redemption Staff','Weapon','Holy Staffs','any','seed'),
+('Exalted Staff','Weapon','Holy Staffs','any','seed'),
+
+
+-- ============================================================
+-- WEAPONS — NATURE STAFFS
+-- ============================================================
+
+('Nature Staff','Weapon','Nature Staffs','any','seed'),
+('Great Nature Staff','Weapon','Nature Staffs','any','seed'),
+('Druidic Staff','Weapon','Nature Staffs','any','seed'),
+('Blight Staff','Weapon','Nature Staffs','any','seed'),
+('Rampant Staff','Weapon','Nature Staffs','any','seed'),
+('Wild Staff','Weapon','Nature Staffs','any','seed'),
+('Ironroot Staff','Weapon','Nature Staffs','any','seed'),
+('Forgebark Staff','Weapon','Nature Staffs','any','seed'),
+
+
+-- ============================================================
+-- WEAPONS — CURSED STAFFS
+-- ============================================================
+
+('Cursed Staff','Weapon','Cursed Staffs','any','seed'),
+('Great Cursed Staff','Weapon','Cursed Staffs','any','seed'),
+('Demonic Staff','Weapon','Cursed Staffs','any','seed'),
+('Cursed Skull','Weapon','Cursed Staffs','any','seed'),
+('Damnation Staff','Weapon','Cursed Staffs','any','seed'),
+('Lifecurse Staff','Weapon','Cursed Staffs','any','seed'),
+('Shadowcaller','Weapon','Cursed Staffs','any','seed'),
+('Rotcaller Staff','Weapon','Cursed Staffs','any','seed'),
+
+
+-- ============================================================
+-- WEAPONS — WAR GLOVES
+-- ============================================================
+
+('Brawler Gloves','Weapon','War Gloves','any','seed'),
+('Battle Bracers','Weapon','War Gloves','any','seed'),
+('Spiked Gauntlets','Weapon','War Gloves','any','seed'),
+('Ursine Maulers','Weapon','War Gloves','any','seed'),
+('Hellfire Hands','Weapon','War Gloves','any','seed'),
+('Ravenstrike Cestus','Weapon','War Gloves','any','seed'),
+('Fists of Avalon','Weapon','War Gloves','any','seed'),
+('Forcepulse Bracers','Weapon','War Gloves','any','seed'),
+('Black Hands','Weapon','War Gloves','any','seed'),
+
+
+-- ============================================================
+-- WEAPONS — SHAPESHIFTER STAFFS
+-- ============================================================
+
+('Prowling Staff','Weapon','Shapeshifter Staffs','any','seed'),
+('Rootbound Staff','Weapon','Shapeshifter Staffs','any','seed'),
+('Primal Staff','Weapon','Shapeshifter Staffs','any','seed'),
+('Bloodmoon Staff','Weapon','Shapeshifter Staffs','any','seed'),
+('Hellspawn Staff','Weapon','Shapeshifter Staffs','any','seed'),
+('Earthrune Staff','Weapon','Shapeshifter Staffs','any','seed'),
+('Lightcaller','Weapon','Shapeshifter Staffs','any','seed'),
+('Stillgaze Staff','Weapon','Shapeshifter Staffs','any','seed'),
+
+
+-- ============================================================
+-- ARMOR — CLOTH CHEST
+-- ============================================================
+
+('Scholar Robe','Armor','Cloth','any','seed'),
+('Cleric Robe','Armor','Cloth','any','seed'),
+('Royal Robe','Armor','Cloth','any','seed'),
+('Druid Robe','Armor','Cloth','any','seed'),
+('Fiend Robe','Armor','Cloth','any','seed'),
+('Feyscale Robe','Armor','Cloth','any','seed'),
+('Purity Robe','Armor','Cloth','any','seed'),
+('Cultist Robe','Armor','Cloth','any','seed'),
+
+
+-- ============================================================
+-- ARMOR — LEATHER CHEST
+-- ============================================================
+
+('Mercenary Jacket','Armor','Leather','any','seed'),
+('Hunter Jacket','Armor','Leather','any','seed'),
+('Assassin Jacket','Armor','Leather','any','seed'),
+('Stalker Jacket','Armor','Leather','any','seed'),
+('Hellion Jacket','Armor','Leather','any','seed'),
+('Specter Jacket','Armor','Leather','any','seed'),
+('Royal Jacket','Armor','Leather','any','seed'),
+('Mistwalker Jacket','Armor','Leather','any','seed'),
+
+
+-- ============================================================
+-- ARMOR — PLATE CHEST
+-- ============================================================
+
+('Soldier Armor','Armor','Plate','any','seed'),
+('Knight Armor','Armor','Plate','any','seed'),
+('Guardian Armor','Armor','Plate','any','seed'),
+('Graveguard Armor','Armor','Plate','any','seed'),
+('Judicator Armor','Armor','Plate','any','seed'),
+('Demon Armor','Armor','Plate','any','seed'),
+('Royal Armor','Armor','Plate','any','seed'),
+('Duskweaver Armor','Armor','Plate','any','seed'),
+
+
+-- ============================================================
+-- HELMETS — CLOTH
+-- ============================================================
+
+('Mage Cowl','Helmet','Cloth','any','seed'),
+('Cleric Cowl','Helmet','Cloth','any','seed'),
+('Scholar Cowl','Helmet','Cloth','any','seed'),
+('Fiend Cowl','Helmet','Cloth','any','seed'),
+('Royal Cowl','Helmet','Cloth','any','seed'),
+('Druid Cowl','Helmet','Cloth','any','seed'),
+('Cultist Cowl','Helmet','Cloth','any','seed'),
+
+
+-- ============================================================
+-- HELMETS — LEATHER
+-- ============================================================
+
+('Hunter Hood','Helmet','Leather','any','seed'),
+('Mercenary Hood','Helmet','Leather','any','seed'),
+('Assassin Hood','Helmet','Leather','any','seed'),
+('Stalker Hood','Helmet','Leather','any','seed'),
+('Hellion Hood','Helmet','Leather','any','seed'),
+('Specter Hood','Helmet','Leather','any','seed'),
+('Royal Hood','Helmet','Leather','any','seed'),
+
+
+-- ============================================================
+-- HELMETS — PLATE
+-- ============================================================
+
+('Soldier Helmet','Helmet','Plate','any','seed'),
+('Knight Helmet','Helmet','Plate','any','seed'),
+('Guardian Helmet','Helmet','Plate','any','seed'),
+('Graveguard Helmet','Helmet','Plate','any','seed'),
+('Judicator Helmet','Helmet','Plate','any','seed'),
+('Demon Helmet','Helmet','Plate','any','seed'),
+('Royal Helmet','Helmet','Plate','any','seed'),
+
+
+-- ============================================================
+-- SHOES — CLOTH
+-- ============================================================
+
+('Mage Sandals','Shoes','Cloth','any','seed'),
+('Cleric Sandals','Shoes','Cloth','any','seed'),
+('Scholar Sandals','Shoes','Cloth','any','seed'),
+('Fiend Sandals','Shoes','Cloth','any','seed'),
+('Royal Sandals','Shoes','Cloth','any','seed'),
+('Druid Sandals','Shoes','Cloth','any','seed'),
+
+
+-- ============================================================
+-- SHOES — LEATHER
+-- ============================================================
+
+('Hunter Shoes','Shoes','Leather','any','seed'),
+('Mercenary Shoes','Shoes','Leather','any','seed'),
+('Assassin Shoes','Shoes','Leather','any','seed'),
+('Stalker Shoes','Shoes','Leather','any','seed'),
+('Hellion Shoes','Shoes','Leather','any','seed'),
+('Specter Shoes','Shoes','Leather','any','seed'),
+('Royal Shoes','Shoes','Leather','any','seed'),
+
+
+-- ============================================================
+-- SHOES — PLATE
+-- ============================================================
+
+('Soldier Boots','Shoes','Plate','any','seed'),
+('Knight Boots','Shoes','Plate','any','seed'),
+('Guardian Boots','Shoes','Plate','any','seed'),
+('Graveguard Boots','Shoes','Plate','any','seed'),
+('Judicator Boots','Shoes','Plate','any','seed'),
+('Demon Boots','Shoes','Plate','any','seed'),
+('Royal Boots','Shoes','Plate','any','seed'),
+
+
+-- ============================================================
+-- OFF-HANDS — TOMES
+-- ============================================================
+
+('Tome of Spells','Off-Hand','Tomes','any','seed'),
+('Muisak','Off-Hand','Tomes','any','seed'),
+('Eye of Secrets','Off-Hand','Tomes','any','seed'),
+('Timelocked Grimoire','Off-Hand','Tomes','any','seed'),
+
+
+-- ============================================================
+-- OFF-HANDS — SHIELDS
+-- ============================================================
+
+('Shield','Off-Hand','Shields','any','seed'),
+('Sarcophagus','Off-Hand','Shields','any','seed'),
+('Facebreaker','Off-Hand','Shields','any','seed'),
+('Caitiff Shield','Off-Hand','Shields','any','seed'),
+('Astral Aegis','Off-Hand','Shields','any','seed'),
+('Unbreakable Ward','Off-Hand','Shields','any','seed'),
+
+
+-- ============================================================
+-- OFF-HANDS — TORCHES
+-- ============================================================
+
+('Torch','Off-Hand','Torches','any','seed'),
+('Mistcaller','Off-Hand','Torches','any','seed'),
+('Leering Cane','Off-Hand','Torches','any','seed'),
+('Cryptcandle','Off-Hand','Torches','any','seed'),
+('Blueflame Torch','Off-Hand','Torches','any','seed'),
+('Sacred Scepter','Off-Hand','Torches','any','seed'),
+
+
+-- ============================================================
+-- OFF-HANDS — NATURE / ARCANE SPECIALIZED
+-- ============================================================
+
+('Taproot','Off-Hand','Specialized Off-Hands','any','seed')
+
+
+ON CONFLICT (name) DO NOTHING;
+
 
 -- ============================================================================
 -- DONE. Verify with:  npm run db:push && npm run db:doctor

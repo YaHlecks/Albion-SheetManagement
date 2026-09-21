@@ -2,7 +2,7 @@
 -- supabase/reset.sql — DEVELOPMENT RESET (DESTRUCTIVE)
 --
 -- Removes the ENTIRE application schema (new + legacy) so `npm run db:push`
--- recreates a clean database from supabase/migrations/0001_init.sql.
+-- recreates a clean database from supabase/migrations/ (0001 + 0002).
 --
 -- ⚠️  NEVER run against production. ⚠️
 -- ⚠️  auth.users is INTENTIONALLY PRESERVED — Supabase Auth infrastructure
@@ -68,6 +68,7 @@ drop function if exists public.update_member_field(uuid, text, text);
 drop function if exists public.revert_member_field(uuid, text, text, text);
 drop function if exists public.ensure_profile();
 drop function if exists public.touch_login();
+drop function if exists public.check_ign_available(text);
 drop function if exists public.claim_first_admin();
 drop function if exists public.log_audit(text, uuid, uuid, uuid, jsonb);
 drop function if exists public.notify_user(uuid, text, text, text, text);
@@ -83,6 +84,8 @@ drop trigger if exists on_auth_user_created on auth.users;
 
 -- 5. Realtime publication: remove app tables (kept if the publication exists)
 do $$
+declare
+  t record;
 begin
   if exists (select 1 from pg_publication where pubname = 'supabase_realtime') then
     for t in select tablename from pg_publication_tables

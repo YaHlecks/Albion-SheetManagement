@@ -2,7 +2,7 @@
   "name": "albion-event-sheets",
   "version": "1.0.0",
   "private": true,
-  "description": "Albion Online team sheet management platform",
+  "description": "Albion Online event / mass scheduling and signup platform",
   "scripts": {
     "dev": "next dev",
     "build": "next build",

@@ -160,7 +160,10 @@ src/
       admin/action/           guarded member-management endpoint (RPC-backed)
   components/                 design-system primitives + feature components
   lib/                        env, supabase clients (browser/server/admin), auth, audit, validation
-supabase/migrations/0001_init.sql   event schema + RPCs + RLS (single idempotent file)
+supabase/migrations/0001_init.sql   event schema + RPCs + RLS (authoritative, idempotent)
+supabase/migrations/0002_auth_profile_layer.sql   auth/profile contract: ensure_profile,
+                                  touch_login, check_ign_available, claim_first_admin,
+                                  login/status timestamps, USER_LOGIN audit, notifications realtime
 supabase/reset.sql                 destructive DEVELOPMENT reset (never touches auth.users)
 middleware.ts                 session refresh + route protection (Node runtime)
 ```
@@ -195,9 +198,9 @@ middleware.ts                 session refresh + route protection (Node runtime)
 ## Testing Performed
 
 - `npm run typecheck` — strict, zero errors
-- `npm test` — 43 unit tests: validation schemas, permission matrix mirroring the DB RPC rules, and 24 static regression guards over the SQL migration (no policy queries its own table → 42P17 cannot return; RLS enabled + grants restricted on every table; audit RPC hardening; bootstrap invariants)
-- `npm run build` — production build passes, 25 routes
-- Workflow checks: register → pending gate → approve → team assignment → sheet editing → audit trail → revert → lock → suspend
+- `npm test` — 75 unit tests: validation schemas, permission matrix mirroring the DB RPC rules, and static regression guards over both SQL migrations (no policy queries its own table → 42P17 cannot return; RLS enabled + grants restricted on every table; auth/profile contract — `ensure_profile`, `touch_login`, `check_ign_available`, `claim_first_admin` — pinned; audit RPC hardening; bootstrap invariants)
+- `npm run build` — production build passes
+- Workflow checks: register → IGN availability → verify email → login self-heal → pending gate → approve → event signup → audit trail → lock → suspend
 
 > Behavioral RLS testing against a live Postgres (probe queries as anon/pending/member/admin roles) requires a real Supabase project; run `npm run db:push` then exercise the five account contexts listed in `tests/permissions.test.ts`.
 
