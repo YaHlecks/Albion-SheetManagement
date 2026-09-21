@@ -27,6 +27,7 @@ export interface MassSlot {
   priority: SlotPriority;
   notes: string | null;
   required: boolean;
+  tier_requirement?: string;
   sort_order: number;
   mass_assignments: MassAssignment[];
 }

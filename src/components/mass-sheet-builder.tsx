@@ -8,7 +8,8 @@
  * assignment (§24/§36).
  */
 import { useMemo, useState } from "react";
-import { Badge, Button, ConfirmDialog } from "@/components/ui";
+import { Badge, Button, ConfirmDialog, Modal } from "@/components/ui";
+import { EquipmentPicker } from "@/components/equipment-picker";
 import { MassSheetPreview } from "@/components/mass-sheet-preview";
 import { composeMassAt, type SlotPriority } from "@/lib/mass";
 import { ALBION_BUILDS, ALBION_ROLES, FILL_NOTES, TIMEZONES } from "@/lib/mass-constants";
@@ -22,6 +23,8 @@ export interface BuilderSlot {
   priority: SlotPriority;
   notes: string;
   required: boolean;
+  /** Structured tier handling (Phase 26): 'any' | T4 … T8.1 */
+  tier_requirement?: string;
   /** Existing assignment on an existing slot — used for delete warnings (§24). */
   assignedIgn?: string | null;
 }
@@ -123,6 +126,7 @@ export function draftFromSheet(sheet: {
         priority: s.priority as SlotPriority,
         notes: s.notes ?? "",
         required: s.required,
+        tier_requirement: (s as { tier_requirement?: string }).tier_requirement ?? "any",
         assignedIgn: s.mass_assignments[0]?.ign ?? null,
       })),
     })),
@@ -143,6 +147,7 @@ export function MassSheetBuilder({ state, onChange, teams, busy, onSave, onCance
   const [step, setStep] = useState(0);
   const [deleteParty, setDeleteParty] = useState<number | null>(null);
   const [deleteSlot, setDeleteSlot] = useState<{ party: number; slot: number } | null>(null);
+  const [pickerSlot, setPickerSlot] = useState<{ party: number; slot: number } | null>(null);
 
   const set = (patch: Partial<BuilderState>) => onChange({ ...state, ...patch });
 
@@ -320,7 +325,15 @@ export function MassSheetBuilder({ state, onChange, teams, busy, onSave, onCance
                     </div>
                     <div>
                       <label htmlFor={`slot-build-${pi}-${si}`} className="field-label">Build / weapon</label>
-                      <input id={`slot-build-${pi}-${si}`} list="albion-builds" className="field sm:w-48" value={slot.build_name} onChange={(e) => setSlot(pi, si, { build_name: e.target.value })} maxLength={80} />
+                      <div className="flex gap-1">
+                        <input id={`slot-build-${pi}-${si}`} list="albion-builds" className="field sm:w-44" value={slot.build_name} onChange={(e) => setSlot(pi, si, { build_name: e.target.value })} maxLength={80} />
+                        <Button type="button" size="sm" variant="secondary" className="h-10" onClick={() => setPickerSlot({ party: pi, slot: si })} aria-label="Browse Albion equipment">
+                          Browse
+                        </Button>
+                      </div>
+                      {slot.tier_requirement && slot.tier_requirement !== "any" && (
+                        <p className="mt-1 text-xs text-brand">Tier: {slot.tier_requirement}</p>
+                      )}
                     </div>
                     <div>
                       <label htmlFor={`slot-prio-${pi}-${si}`} className="field-label">Priority</label>
@@ -435,6 +448,18 @@ export function MassSheetBuilder({ state, onChange, teams, busy, onSave, onCance
         onConfirm={() => deleteSlot && removeSlot(deleteSlot.party, deleteSlot.slot)}
         onCancel={() => setDeleteSlot(null)}
       />
+
+      {/* Albion equipment browser (Phase 4/26) — selection sets build + tier */}
+      <Modal open={pickerSlot !== null} onClose={() => setPickerSlot(null)} title="Albion equipment" wide>
+        {pickerSlot && (
+          <EquipmentPicker
+            onPick={(name, tier) => {
+              setSlot(pickerSlot.party, pickerSlot.slot, { build_name: name, tier_requirement: tier });
+            }}
+            onClose={() => setPickerSlot(null)}
+          />
+        )}
+      </Modal>
     </div>
   );
 }

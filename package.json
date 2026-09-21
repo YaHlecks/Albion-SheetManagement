@@ -12,6 +12,7 @@
     "db:push": "node scripts/db-push.mjs",
     "db:bootstrap": "node scripts/db-bootstrap.mjs",
     "db:doctor": "node scripts/db-doctor.mjs",
+    "equipment:sync": "node scripts/equipment-sync.mjs",
     "lint": "tsc --noEmit"
   },
   "dependencies": {

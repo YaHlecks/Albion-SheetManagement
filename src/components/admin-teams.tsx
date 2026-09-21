@@ -45,10 +45,19 @@ export function AdminTeamsClient({ teams: initialTeams }: { teams: AdminTeamRow[
       });
       const json = await res.json().catch(() => ({}));
       if (!res.ok || json.ok === false) {
-        toast.error("Could not create the team.");
+        // Surface the database's actual verdict — never a generic guess.
+        const code = typeof json?.error === "string" ? json.error : null;
+        toast.error(
+          code === "NAME_TAKEN" ? "A team with that name already exists."
+          : code === "INVALID_TEAM_NAME" ? "Team name must be 2–60 characters."
+          : code === "INVALID_STATUS" ? "Invalid team status."
+          : code === "FORBIDDEN" ? "Your account is not an admin in the database (profiles.is_platform_admin). Re-run migrations or fix your profile."
+          : code === "UNKNOWN_ACTION" ? "Database function missing — run: npm run db:push"
+          : "Could not create the team. Please try again."
+        );
         return;
       }
-      toast.success("Team created.");
+      toast.success("✓ Team created successfully");
       setCreateOpen(false);
       setName("");
       setDescription("");

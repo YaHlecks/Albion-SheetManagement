@@ -52,6 +52,7 @@ export function EditMassSheetClient({ sheetId, sheet, teams }: {
             priority: s.priority,
             notes: s.notes.trim() || null,
             required: s.required,
+            tier_requirement: s.tier_requirement ?? "any",
             sort_order: si,
           })),
         })),

@@ -235,7 +235,12 @@ function SlotRow({ slot, zebra, currentUserId, isAdmin, editable, onAction, onCl
         {slot.priority === "high" && <div className="text-xs text-warn">★ High priority</div>}
         {slot.notes && <div className="text-xs text-faint">{slot.notes}</div>}
       </td>
-      <td className="px-3 py-2 align-top font-mono text-xs">{slot.build_name}</td>
+      <td className="px-3 py-2 align-top font-mono text-xs">
+        {slot.build_name}
+        {slot.tier_requirement && slot.tier_requirement !== "any" && (
+          <span className="ml-1 text-brand">· {slot.tier_requirement}</span>
+        )}
+      </td>
       <td className="px-3 py-2 align-top font-semibold">{claimed ? claimed.ign : <span className="text-faint">—</span>}</td>
       <td className="px-3 py-2 align-top"><StatusBadge slot={slot} /></td>
       <td className="px-3 py-2 align-top text-right">

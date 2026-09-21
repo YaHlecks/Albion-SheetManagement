@@ -46,7 +46,7 @@ const client = new Client({
 });
 
 const TABLES = ["profiles", "teams", "team_members", "notifications", "audit_logs",
-  "mass_sheets", "mass_parties", "mass_slots", "mass_assignments"];
+  "mass_sheets", "mass_parties", "mass_slots", "mass_assignments", "albion_equipment"];
 const MASS_TABLES = ["mass_sheets", "mass_parties", "mass_slots", "mass_assignments"];
 
 /** What the application is supposed to be able to do, per role. */
@@ -267,6 +267,33 @@ try {
       const r = await probe("authenticated", `select public.${fn}(${args});`, claims);
       report(r.ok, `${fn} executable by authenticated`, r.ok ? "granted" : `${r.code}: ${r.message}`);
     }
+
+    // THE team-creation probe (Phase 29): run the EXACT production path —
+    // admin_action('create_team') — as an admin session, inside a probe that
+    // is rolled back. Verifies policy→RPC→teams INSERT→team_members→trigger
+    // chain in one shot without leaving test data behind.
+    const probeName = `__doctor_probe_${Date.now()}`;
+    const ct = await probe("authenticated",
+      `select public.admin_action('create_team', null, null, null,
+        jsonb_build_object('name', '${probeName}', 'description', 'db:doctor probe'), null) as res;`,
+      claims);
+    const ctOk = ct.ok && ct.rows?.[0]?.res?.ok === true;
+    report(ctOk, "create_team RPC succeeds for admin session",
+      ctOk ? "team + Leader membership + audit (rolled back)"
+        : `FAILED → ${ct.rows?.[0]?.res?.error ?? ct.code ?? ct.message} (this is why Create Team fails in the app)`);
+    if (ctOk) {
+      const mem = await probe("authenticated",
+        `select count(*)::int as n from public.team_members tm
+         join public.teams t on t.id = tm.team_id
+         where t.name = '${probeName}';`, claims);
+      report(mem.ok && mem.rows?.[0]?.n >= 1, "creator membership written atomically",
+        mem.ok ? `${mem.rows[0].n} membership row(s)` : `${mem.code}: ${mem.message}`);
+    }
+
+    // Equipment catalog present and readable (Phase 3).
+    const eq = await probe("authenticated", `select count(*)::int as n from public.albion_equipment where active;`, claims);
+    report(eq.ok && eq.rows?.[0]?.n > 0, "albion_equipment catalog readable",
+      eq.ok ? `${eq.rows[0].n} active entries` : `${eq.code}: ${eq.message}`);
   } else {
     console.error("  • No admin profile exists yet — register the first account to complete admin-session probes.");
   }
