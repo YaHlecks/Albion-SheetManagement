@@ -1,5 +1,6 @@
 import Link from "next/link";
-import { Clock, ShieldX, XCircle } from "lucide-react";
+import { redirect } from "next/navigation";
+import { Clock, ShieldX, TriangleAlert, XCircle } from "lucide-react";
 import { Logo } from "@/components/ui";
 import { createSupabaseServerClient } from "@/lib/supabase-server";
 
@@ -35,7 +36,7 @@ const statusCopy: Record<string, { title: string; body: string; icon: React.Comp
 export default async function PendingApprovalPage({
   searchParams,
 }: {
-  searchParams: Promise<{ status?: string }>;
+  searchParams: Promise<{ status?: string; error?: string }>;
 }) {
   const sp = await searchParams;
   const supabase = await createSupabaseServerClient();
@@ -43,15 +44,53 @@ export default async function PendingApprovalPage({
     data: { user },
   } = await supabase.auth.getUser();
 
+  // PROFILE_ERROR state (§5/§7): the profile row could not be loaded (RLS/
+  // database failure) — this is NOT "pending approval" and must not present
+  // as one. Distinct copy + explicit retry back to the guarded route.
+  if (sp.error === "profile-db") {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-bg px-4">
+        <div className="auth-card text-center">
+          <div className="mb-4 flex justify-center">
+            <Logo size={40} />
+          </div>
+          <span className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-danger-soft text-danger">
+            <TriangleAlert size={22} />
+          </span>
+          <h1 className="font-display text-2xl font-bold tracking-tight">We couldn't load your account</h1>
+          <p className="mt-3 text-sm leading-relaxed text-muted">
+            Your session is active, but your account profile could not be read from the database.
+            This is a temporary error — not an approval status. Try again; if it persists, an
+            administrator should check the application logs.
+          </p>
+          <div className="mt-6 flex flex-col gap-2">
+            <Link href="/dashboard" className="btn btn-primary w-full">Try again</Link>
+            <Link href="/" className="text-sm text-faint hover:text-muted">Back to home</Link>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   let status = sp.status ?? "pending";
   if (user) {
-    // Prefer the authoritative DB value when a session exists.
-    const { data: profile } = await supabase
+    // Prefer the authoritative DB value when a session exists. If the read
+    // fails, fall back to the query param (the DB error is logged; the guard
+    // already chose the correct branch when it redirected here).
+    const { data: profile, error } = await supabase
       .from("profiles")
-      .select("status")
+      .select("status, is_platform_admin")
       .eq("id", user.id)
       .maybeSingle();
-    if (profile?.status) status = profile.status;
+    if (error) console.error("[auth] pending-approval profile read failed:", error.message);
+    if (profile) {
+      // Self-bounce: the account is approved (e.g. approval landed while this
+      // screen was open, or a stale redirect arrived) — never trap them.
+      if (profile.status === "approved" || profile.status === "active") {
+        redirect(profile.is_platform_admin ? "/admin" : "/dashboard");
+      }
+      status = profile.status;
+    }
   }
 
   const copy = statusCopy[status] ?? statusCopy.pending;

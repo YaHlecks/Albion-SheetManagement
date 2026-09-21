@@ -4,9 +4,14 @@ import { env } from "./env";
 
 /**
  * Server-side session guard for protected pages.
- * - No session -> redirect to /login (preserving destination)
- * - Session with pending/rejected/suspended profile -> redirect to /pending-approval
- * - Approved -> return the session context
+ * Route decision happens ONLY after the profile has been resolved (§4):
+ * - No session                -> /login (preserving destination)
+ * - Profile missing / DB error-> /pending-approval?error=profile-db (distinct
+ *                               PROFILE_ERROR state — never "pending")
+ * - status = pending/etc      -> /pending-approval?status=...
+ * - Approved                  -> render (admin pages additionally use
+ *                               requireAdminPage, which is a separate check —
+ *                               an active member is NOT "pending", §12)
  */
 export async function requirePageSession(): Promise<SessionContext> {
   if (!env.supabaseConfigured) {
@@ -17,7 +22,28 @@ export async function requirePageSession(): Promise<SessionContext> {
 
   const ctx = await getSessionContext();
   if (!ctx) redirect("/login");
-  if (!ctx.isApproved) redirect("/pending-approval");
+
+  if (!ctx.profile) {
+    // PROFILE_ERROR ≠ PENDING (§4/§5/§7): the profile row could not be loaded
+    // (RLS/database failure) or does not exist. Log the decision, keep the
+    // session, and surface the distinct error state — which retries the
+    // guarded route, so a transient failure self-recovers.
+    console.error(
+      `[auth] route guard: requested=session profile=ERROR (row missing or DB failure) user=${ctx.userId}`
+    );
+    redirect("/pending-approval?error=profile-db");
+  }
+
+  if (!ctx.isApproved) {
+    console.info(
+      `[auth] route guard: requested=session profile=loaded role=${ctx.isPlatformAdmin ? "ADMIN" : "MEMBER"} status=${ctx.profile.status} authorized=false redirect=/pending-approval`
+    );
+    redirect(`/pending-approval?status=${encodeURIComponent(ctx.profile.status)}`);
+  }
+
+  console.info(
+    `[auth] route guard: requested=session profile=loaded role=${ctx.isPlatformAdmin ? "ADMIN" : "MEMBER"} status=${ctx.profile.status} authorized=true redirect=none`
+  );
   return ctx;
 }
 

@@ -55,42 +55,69 @@ function LoginForm() {
         return;
       }
 
-      // Self-heal: if the signup trigger has not created the profile yet
+      // ---- AUTH INITIALIZING → SESSION LOADED → PROFILE LOADING → PROFILE
+      // ---- LOADED → ROLE+STATUS VERIFIED → ROUTE DECISION (§5 state machine)
+      // Self-heal 1/2: if the signup trigger has not created the profile yet
       // (race on a brand-new account), the definer RPC provisions it now
-      // from the verified JWT. Then read the authoritative status.
+      // from the verified JWT. A DB failure here is NOT "pending" — keep the
+      // session and surface a distinct profile-error state (§7).
       const { data: ensured, error: ensureError } = await supabase.rpc("ensure_profile");
       if (ensureError || !ensured?.ok) {
-        setBanner("Could not verify your account. Please try again.");
-        await supabase.auth.signOut();
-        return;
+        console.error("[auth] ensure_profile failed:", ensureError?.message ?? ensured?.error);
+        router.replace("/pending-approval?error=profile-db");
+        return; // session deliberately kept — error state, not a logout
       }
 
+      // Self-heal 2/2: repair deployments whose earliest account registered
+      // before the first-admin rule existed (stuck at pending/non-admin).
+      // The DB decides — no-op unless the caller is the earliest profile and
+      // no administrator exists. Idempotent for everyone else.
+      const { data: claim } = await supabase.rpc("claim_first_admin");
+      if (claim?.promoted) {
+        console.info(
+          `[auth] first-admin self-heal applied: role=ADMIN status=${claim.status}`
+        );
+      }
+
+      // Fresh, authoritative read (never cached client state, §9).
       const { data: profile, error: profileError } = await supabase
         .from("profiles")
-        .select("status")
+        .select("status, is_platform_admin")
         .eq("id", data.user.id)
         .maybeSingle();
 
       if (profileError || !profile) {
-        setBanner("Could not verify your account. Please try again.");
-        await supabase.auth.signOut();
+        // PROFILE_ERROR ≠ PENDING (§4/§5): log the real cause, keep the
+        // session, show a distinct state with a retry instead of falsely
+        // telling an admin their account is unapproved.
+        if (profileError) console.error("[auth] profile load failed:", profileError.message);
+        router.replace("/pending-approval?error=profile-db");
         return;
       }
 
-      if (profile.status !== "approved" && profile.status !== "active") {
-        // Keep the session (middleware treats /pending-approval as public and
-        // the page prefers the live DB status). Signing out here caused a
-        // bounce loop for pending users; this screen explains the state.
-        router.replace(`/pending-approval?status=${encodeURIComponent(String(profile.status))}`);
+      const isAdmin = profile.is_platform_admin === true;
+      const status = String(profile.status);
+      console.info(
+        `[auth] decision: session=authenticated profile=loaded role=${isAdmin ? "ADMIN" : "MEMBER"} status=${status}`
+      );
+
+      if (status !== "approved" && status !== "active") {
+        // Legit non-approved states only — this branch is now unreachable for
+        // profile-loading/DB-error cases (handled above).
+        router.replace(`/pending-approval?status=${encodeURIComponent(status)}`);
         return;
       }
 
       // Record login time + USER_LOGIN audit event before navigating.
       await supabase.rpc("touch_login");
 
+      console.info(
+        `[auth] route: requested=${params.get("next") ?? "(default)"} authorized=true redirect=none`
+      );
       toast.success("Signed in. Welcome back!");
       const next = params.get("next");
-      router.replace(next && next.startsWith("/") ? next : "/dashboard");
+      const fallback = isAdmin ? "/admin" : "/dashboard";
+      router.replace(next && next.startsWith("/") ? next : fallback);
       router.refresh();
     } catch {
       setBanner("Network error. Check your connection and try again.");

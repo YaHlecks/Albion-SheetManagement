@@ -15,7 +15,6 @@ Team sheet management platform for Albion Online guilds — controlled team shee
 npm install
 cp .env.example .env.local   # fill in the values (see below)
 npm run db:push              # create schema, triggers, policies (needs DATABASE_URL)
-npm run db:bootstrap -- you@example.com   # promote your admin account (one-time)
 npm run dev                  # http://localhost:3000
 ```
 
@@ -34,15 +33,19 @@ npm run dev                  # http://localhost:3000
 
 Secrets are never committed (`.env*` is git-ignored) and the service-role key is only read in server modules guarded against browser use.
 
-### First administrator (one-time bootstrap)
+### First administrator
 
-Admin rights are **never** granted automatically — "first registered user becomes admin" would hand the platform to whoever registers first. Instead, register your admin account normally through `/register`, then run the one-time bootstrap script:
+**Zero-config on a fresh database:** the first account to register automatically becomes the platform administrator (`is_platform_admin = true`, status `approved`). The decision is made **inside the `handle_new_user` trigger** on `auth.users` — a `security definer` function the client cannot influence — and is serialized with `pg_advisory_xact_lock`, so two simultaneous registrations cannot both claim the "first" slot (no check-then-insert race). Both the `USER_REGISTERED` and the `PERMISSION_CHANGED` bootstrap events are written to the audit log. Every subsequent registration is an ordinary pending member awaiting approval.
+
+**Existing databases whose earliest account predates this rule** (it would be stuck at `pending`): the app self-heals — `claim_first_admin()` is a security-definer RPC that promotes the caller **only if** it is the earliest profile in the database **and** no administrator exists; otherwise it is a no-op. It runs automatically at session resolution (idempotent, audited as `PERMISSION_CHANGED`).
+
+If you ever need a different owner (or all admins were lost), use the recovery script:
 
 ```bash
 npm run db:bootstrap -- you@example.com
 ```
 
-(Or paste `supabase/bootstrap-admin.sql` into the Supabase SQL Editor after editing the email at the top.) The script verifies the account exists in `auth.users`, provisions the profile if needed, promotes it to `is_platform_admin`, approves it, and writes an auditable `PERMISSION_CHANGED` event. It never creates credentials and is idempotent. Additional admins are then promoted from the UI (Admin → Members → Grant admin), enforced inside the `admin_action` RPC.
+(Or paste `supabase/bootstrap-admin.sql` into the Supabase SQL Editor after editing the email at the top.) Use it when the database predates the first-admin rule, the intended admin registered second, or all admins were removed. The script verifies the account exists in `auth.users`, provisions the profile if needed, promotes it to `is_platform_admin`, approves it, and writes an auditable `PERMISSION_CHANGED` event. It never creates credentials and is idempotent. Additional admins are then promoted from the UI (Admin → Members → Grant admin), enforced inside the `admin_action` RPC.
 
 ## The Complete Chain
 
@@ -101,7 +104,7 @@ middleware.ts                 session refresh + route protection (Node runtime)
 | `npm run typecheck` | `tsc --noEmit` |
 | `npm test` | Vitest unit tests (validation + permission logic + DB policy regression guards) |
 | `npm run db:push` | Apply `supabase/migrations/*.sql` via `DATABASE_URL` |
-| `npm run db:bootstrap -- email` | One-time: promote a registered account to platform admin |
+| `npm run db:bootstrap -- email` | Recovery: promote a registered account to platform admin (first admin is automatic on a fresh DB) |
 
 ## Deployment (Vercel)
 

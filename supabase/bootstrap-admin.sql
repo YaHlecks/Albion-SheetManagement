@@ -1,28 +1,25 @@
 -- ============================================================================
--- ONE-TIME: designate the initial platform administrator.
+-- RECOVERY: designate/restore a platform administrator.
 --
--- Run ONCE, after your admin user has registered (they can register normally
--- through /register — the account starts as "pending"). Run this script via
--- the Supabase SQL Editor, or `npm run db:bootstrap -- admin@example.com`.
+-- Normally you do NOT need this script: in a fresh deployment the first
+-- account to register automatically becomes the platform administrator
+-- (decided race-safely inside the handle_new_user trigger — see
+-- 0001_init.sql). Use this script only when:
+--   * the database already had users before the first-admin rule existed,
+--   * the intended admin registered second, or
+--   * all administrators were somehow removed and you must restore one.
 --
--- Why a script instead of "first user becomes admin": an automatic rule is
--- either controllable by an attacker (register first, own the platform) or
--- wrong after a deploy (the "first" slot is already taken). A one-time,
--- operator-run, auditable SQL step is the standard Supabase bootstrap.
+-- Run via the Supabase SQL Editor (edit v_email below first), or:
+--   npm run db:bootstrap -- admin@example.com
 --
--- The script:
---   1. verifies the account exists in auth.users,
---   2. creates the profile row if the signup trigger has not fired yet,
---   3. promotes it to is_platform_admin,
---   4. approves it (so the admin can actually reach the admin UI),
---   5. writes an auditable PERMISSION_CHANGED event.
--- Re-running is safe: it re-promotes the same account and writes no extra
--- rows if the account is already an approved admin.
+-- The script verifies the account exists in auth.users, creates the profile
+-- row if missing, promotes it to is_platform_admin, approves it, and writes
+-- an auditable PERMISSION_CHANGED event. Re-running is safe.
 -- ============================================================================
 
 do $$
 declare
-  -- <<< EDIT: the email of the account you registered as your admin >>>
+  -- <<< EDIT: the email of the account to promote >>>
   v_email text := 'admin@example.com';
 
   v_user auth.users;

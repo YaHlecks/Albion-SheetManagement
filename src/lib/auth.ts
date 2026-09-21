@@ -36,7 +36,7 @@ export const getSessionContext = cache(async (): Promise<SessionContext | null> 
   let isPlatformAdmin = false;
   if (hasServiceRole()) {
     const admin = createAdminClient();
-    const { data } = await admin
+    const { data, error } = await admin
       .from("profiles")
       .select("id, ign, discord, status, is_platform_admin, created_at, last_login_at")
       .eq("id", user.id)
@@ -51,6 +51,9 @@ export const getSessionContext = cache(async (): Promise<SessionContext | null> 
         createdAt: data.created_at,
         lastLoginAt: data.last_login_at ?? null,
       };
+    } else if (error) {
+      // DATABASE/RLS failure — must never be interpreted as "pending".
+      console.error("[auth] profile load failed (service-role):", error.message);
     } else {
       // Self-healing first login in service-role mode: provision the missing
       // profile from the verified user, defaulting to pending/non-admin.
@@ -87,7 +90,7 @@ export const getSessionContext = cache(async (): Promise<SessionContext | null> 
     }
   } else {
     // Anon-key mode: read the caller's own profile row through RLS.
-    const { data: row } = await supabase
+    const { data: row, error: rowError } = await supabase
       .from("profiles")
       .select("id, ign, discord, status, is_platform_admin, created_at, last_login_at")
       .eq("id", user.id)
@@ -102,6 +105,9 @@ export const getSessionContext = cache(async (): Promise<SessionContext | null> 
         createdAt: row.created_at,
         lastLoginAt: row.last_login_at ?? null,
       };
+    } else if (rowError) {
+      // DATABASE/RLS failure — must never be interpreted as "pending".
+      console.error("[auth] profile load failed (anon-key):", rowError.message);
     } else {
       // Self-healing first login: authentication succeeded but the profile
       // row does not exist yet (signup-trigger race/failure). The definer RPC
@@ -136,6 +142,27 @@ export const getSessionContext = cache(async (): Promise<SessionContext | null> 
     isPlatformAdmin = flag === true || (profile?.isPlatformAdmin ?? false);
   } else {
     isPlatformAdmin = profile?.isPlatformAdmin ?? false;
+  }
+
+  // First-admin self-heal: for databases whose earliest account registered
+  // before the first-admin rule existed (stuck at pending/non-admin), the
+  // caller is promoted — but only if it truly is the earliest profile and
+  // no administrator exists. Evaluated inside the DB under the same advisory
+  // lock as the signup trigger; a no-op for everyone else. Fires on session
+  // resolution (not just login) so it also repairs direct-URL visits and
+  // refreshes, and keeps service-role and anon-key modes consistent.
+  if (profile && !profile.isPlatformAdmin) {
+    try {
+      const { data: claim } = hasServiceRole()
+        ? await createAdminClient().rpc("claim_first_admin")
+        : await supabase.rpc("claim_first_admin");
+      if (claim?.promoted) {
+        profile = { ...profile, status: claim.status as AccountStatus, isPlatformAdmin: true };
+        isPlatformAdmin = true;
+      }
+    } catch (claimError) {
+      console.error("[auth] claim_first_admin failed:", claimError);
+    }
   }
 
   return {

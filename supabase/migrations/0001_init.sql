@@ -326,6 +326,83 @@ revoke all on function public.ensure_profile() from public, anon;
 grant execute on function public.ensure_profile() to authenticated;
 
 -- ============================================================================
+-- RPC: claim_first_admin()
+--
+-- Self-healing repair for deployments whose earliest account registered
+-- BEFORE the first-admin rule existed in handle_new_user: that account is
+-- stuck as pending/non-admin and can never reach the admin UI to fix itself.
+-- The authenticated caller (identity = auth.uid(), never client input) is
+-- promoted IF AND ONLY IF it is the earliest profile AND no administrator
+-- exists. Otherwise it is a no-op and merely reports the caller's state.
+-- The same advisory lock as the signup trigger keeps it race-free against
+-- concurrent registrations and against itself. Idempotent: safe to call on
+-- every login. Promotion is audited (PERMISSION_CHANGED).
+-- ============================================================================
+create or replace function public.claim_first_admin()
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_row public.profiles;
+  v_earliest uuid;
+  v_promoted boolean := false;
+begin
+  if auth.uid() is null then
+    return jsonb_build_object('ok', false, 'error', 'UNAUTHENTICATED');
+  end if;
+
+  perform pg_advisory_xact_lock(hashtext('albion-team-sheets:first-admin'));
+
+  select * into v_row from public.profiles where id = auth.uid();
+  if not found then
+    -- ensure_profile() handles provisioning; this RPC only repairs roles.
+    return jsonb_build_object('ok', false, 'error', 'PROFILE_MISSING');
+  end if;
+
+  if not coalesce(v_row.is_platform_admin, false) then
+    if not exists (select 1 from public.profiles where is_platform_admin) then
+      select p.id into v_earliest
+        from public.profiles p
+        order by p.created_at asc, p.id asc
+        limit 1;
+      if v_earliest = auth.uid() then
+        update public.profiles
+           set is_platform_admin = true,
+               status = 'approved',
+               approved_at = coalesce(approved_at, now())
+         where id = auth.uid();
+        v_promoted := true;
+        insert into public.audit_logs (action, actor_id, target_user_id, meta)
+        values (
+          'PERMISSION_CHANGED', auth.uid(), auth.uid(),
+          jsonb_build_object(
+            'reason', 'first-account self-heal: earliest account promoted to platform administrator',
+            'granted_by', 'claim_first_admin RPC'
+          )
+        );
+      end if;
+    end if;
+  end if;
+
+  if v_promoted then
+    select * into v_row from public.profiles where id = auth.uid();
+  end if;
+
+  return jsonb_build_object(
+    'ok', true,
+    'promoted', v_promoted,
+    'status', v_row.status,
+    'is_platform_admin', v_row.is_platform_admin
+  );
+end;
+$$;
+
+revoke all on function public.claim_first_admin() from public, anon;
+grant execute on function public.claim_first_admin() to authenticated, service_role;
+
+-- ============================================================================
 -- RPC: a member's own recent activity
 --
 -- Members must not read the audit_logs table (admin-only by policy), but the
@@ -368,6 +445,7 @@ as $$
 declare
   new_ign text;
   new_discord text;
+  v_is_first_user boolean := false;
 begin
   -- Idempotent guard: rerunning the migration (or overlapping triggers) must
   -- never create a duplicate profile.
@@ -386,16 +464,53 @@ begin
     new_discord := left(new_discord, 64);
   end if;
 
-  -- is_platform_admin is deliberately NOT auto-granted here. The initial
-  -- administrator is established by the one-time, auditable script
-  -- supabase/bootstrap-admin.sql (see README "First administrator").
+  -- --------------------------------------------------------------------------
+  -- FIRST-ADMIN BOOTSTRAP (secure, race-safe)
+  --
+  -- In an empty deployment, the very first account becomes the platform
+  -- administrator and is approved immediately; every later registration is a
+  -- pending, non-admin member. The decision is made HERE, inside a
+  -- security-definer trigger on auth.users, so the client controls neither
+  -- the role nor the timing:
+  --   * the only way to reach this code is a real auth.users insert;
+  --   * the caller never supplies role/status fields;
+  --   * pg_advisory_xact_lock serializes concurrent signups, closing the
+  --     check-then-insert TOCTOU window: two users registering at the same
+  --     moment cannot both observe an empty profiles table.
+  -- For deployments that already have users (or a lost-admin recovery), the
+  -- operator script supabase/bootstrap-admin.sql remains the sanctioned path.
+  -- --------------------------------------------------------------------------
+  perform pg_advisory_xact_lock(hashtext('albion-team-sheets:first-admin'));
+  v_is_first_user := not exists (select 1 from public.profiles);
+
   insert into public.profiles (id, ign, discord, status, is_platform_admin)
-  values (new.id, new_ign, new_discord, 'pending', false)
+  values (
+    new.id,
+    new_ign,
+    new_discord,
+    case when v_is_first_user then 'approved' else 'pending' end,
+    v_is_first_user
+  )
   on conflict (id) do nothing;
 
   insert into public.audit_logs (action, actor_id, target_user_id, meta)
   values ('USER_REGISTERED', new.id, new.id,
-    jsonb_build_object('ign', new_ign, 'email', new.email));
+    jsonb_build_object(
+      'ign', new_ign,
+      'email', new.email,
+      'bootstrapped_admin', v_is_first_user
+    ));
+
+  if v_is_first_user then
+    insert into public.audit_logs (action, actor_id, target_user_id, meta)
+    values (
+      'PERMISSION_CHANGED', new.id, new.id,
+      jsonb_build_object(
+        'reason', 'first-account bootstrap: initial platform administrator',
+        'granted_by', 'handle_new_user trigger'
+      )
+    );
+  end if;
 
   return new;
 end;
@@ -461,7 +576,6 @@ begin
 end;
 $$;
 
-drop trigger if exists on_profile_update on public.profiles;
 drop trigger if exists on_profile_update on public.profiles;
 create trigger on_profile_update
   before update on public.profiles

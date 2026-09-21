@@ -164,14 +164,45 @@ describe("Privileged RPC hardening", () => {
 });
 
 describe("Account lifecycle & bootstrap", () => {
-  it("signup no longer auto-grants admin to the first account", () => {
+  it("first account becomes admin+approved inside the signup trigger (race-safe)", () => {
     const idx = sql.indexOf("function public.handle_new_user()");
     const body = sql.slice(idx, sql.indexOf("$$;", idx));
-    expect(body).not.toContain("profile_count");
-    expect(body).toMatch(/'pending', false/);
+    // Race-safety: serializes concurrent signups so two users cannot both
+    // observe an empty profiles table (TOCTOU).
+    expect(body).toContain("pg_advisory_xact_lock");
+    // The decision reads the protected table inside a security-definer
+    // function — never from client-supplied fields.
+    expect(body).toContain("not exists (select 1 from public.profiles)");
+    expect(body.match(/v_is_first_user/g)?.length ?? 0).toBeGreaterThanOrEqual(4); // compute + status + role + audit
+    // First user: approved admin; everyone else: pending member.
+    expect(body).toContain("'approved'");
+    expect(body).toContain("'pending'");
+    // Bootstrap is auditable.
+    expect(body).toContain("'PERMISSION_CHANGED'");
+    expect(body).toContain("bootstrapped_admin");
   });
 
-  it("the one-time bootstrap script promotes an existing registered account", () => {
+  it("claim_first_admin self-heals the earliest pre-rule account — and only that case", () => {
+    const idx = sql.indexOf("function public.claim_first_admin()");
+    expect(idx).toBeGreaterThan(-1);
+    const body = sql.slice(idx, sql.indexOf("$$;", idx));
+    expect(body).toContain("auth.uid() is null");
+    // Race-safety + atomicity: same lock as the signup trigger.
+    expect(body).toContain("pg_advisory_xact_lock");
+    // Guards: only when no admin exists AND caller is the earliest profile.
+    expect(body).toContain("not exists (select 1 from public.profiles where is_platform_admin)");
+    expect(body).toContain("order by p.created_at asc, p.id asc");
+    expect(body).toContain("v_earliest = auth.uid()");
+    // Promotion is audited and reported.
+    expect(body).toContain("'PERMISSION_CHANGED'");
+    expect(body).toContain("'promoted', v_promoted");
+    // Executable by the two legitimate session contexts only.
+    expect(sql).toMatch(
+      /grant execute on function public\.claim_first_admin\(\) to authenticated, service_role/
+    );
+  });
+
+  it("the recovery script promotes an existing registered account", () => {
     expect(bootstrap).toContain("is_platform_admin = true");
     expect(bootstrap).toContain("status = 'approved'");
     expect(bootstrap).toMatch(/PERMISSION_CHANGED/);
