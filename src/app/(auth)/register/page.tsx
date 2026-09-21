@@ -2,19 +2,20 @@
 
 import { useState, type FormEvent } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { Eye, EyeOff } from "lucide-react";
+import { Eye, EyeOff, MailCheck } from "lucide-react";
 import { createBrowserClient } from "@/lib/supabase-browser";
+import { getAuthCallbackUrl } from "@/lib/app-url";
 import { registerSchema, fieldErrors } from "@/lib/validation";
 import { Button } from "@/components/ui";
+import { ResendVerification } from "@/components/resend-verification";
 
 export default function RegisterPage() {
-  const router = useRouter();
   const [form, setForm] = useState({ ign: "", email: "", discord: "", password: "", confirmPassword: "" });
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [banner, setBanner] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [done, setDone] = useState(false);
+  /** null = form; otherwise the address the verification email was sent to. */
+  const [pendingEmail, setPendingEmail] = useState<string | null>(null);
   const [showPassword, setShowPassword] = useState(false);
 
   function set<K extends keyof typeof form>(key: K, value: string) {
@@ -51,17 +52,15 @@ export default function RegisterPage() {
         return;
       }
 
-      const redirectUrl =
-        typeof window !== "undefined"
-          ? `${window.location.origin}/auth/callback?next=/login?registered=1`
-          : undefined;
-
       const { data, error } = await supabase.auth.signUp({
         email: parsed.data.email,
         password: parsed.data.password,
         options: {
           data: { ign: parsed.data.ign, discord: parsed.data.discord || null },
-          emailRedirectTo: redirectUrl,
+          // Env-based verification callback (NEXT_PUBLIC_APP_URL →
+          // VERCEL_URL → current origin fallback); /verify-email renders the
+          // "Email verified" experience — never the password-reset page.
+          emailRedirectTo: `${getAuthCallbackUrl()}?next=/verify-email`,
         },
       });
 
@@ -78,14 +77,11 @@ export default function RegisterPage() {
         return;
       }
 
-      if (data.user && !data.session) {
-        // Email confirmation required.
-        setDone(true);
-        return;
-      }
-
-      // Signed up without confirmation requirement — mark success and exit.
-      setDone(true);
+      // Registration succeeded. Whether or not Supabase returned a session
+      // (it returns one only when email confirmation is disabled in the
+      // project settings), the account is NOT considered verified here.
+      // The user must complete email verification first.
+      setPendingEmail(parsed.data.email);
     } catch {
       setBanner("Network error. Check your connection and try again.");
     } finally {
@@ -93,25 +89,39 @@ export default function RegisterPage() {
     }
   }
 
-  if (done) {
+  // -----------------------------------------------------------------------
+  // "Check your email" state — the required post-registration experience.
+  // Registration ≠ verification: the account exists, the email is not
+  // confirmed until the user clicks "Verify My Account" in the email.
+  // -----------------------------------------------------------------------
+  if (pendingEmail) {
     return (
       <div className="auth-card text-center">
-        <span className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-success-soft text-success">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M20 6 9 17l-5-5" />
-          </svg>
+        <span className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-info-soft text-info">
+          <MailCheck size={22} />
         </span>
-        <h1 className="font-display text-2xl font-bold tracking-tight">Registration successful</h1>
+        <h1 className="font-display text-2xl font-bold tracking-tight">Check your email</h1>
         <p className="mt-3 text-sm leading-relaxed text-muted">
-          Your account has been created and is currently <strong className="text-warn">waiting for administrator approval</strong>.
-          You will be able to log in once an administrator approves it.
+          We&apos;ve sent a verification email to:
         </p>
-        <p className="mt-2 text-xs text-faint">
-          If email confirmation is enabled, check your inbox first to verify your address.
+        <p className="mt-1 text-sm font-semibold text-ink break-all">{pendingEmail}</p>
+        <p className="mt-4 text-sm leading-relaxed text-muted">
+          Click <strong className="text-ink">&ldquo;Verify My Account&rdquo;</strong> in that email
+          to verify your address. After verification you can sign in — new member accounts then
+          wait briefly for administrator approval.
         </p>
-        <Link href="/login" className="btn btn-secondary mt-6 w-full">
-          Back to login
-        </Link>
+        <p className="mt-3 text-xs text-faint">
+          No email? Check your spam or junk folder — sometimes it lands there.
+        </p>
+
+        <ResendVerification email={pendingEmail} className="mt-4" />
+
+        <div className="mt-5 border-t border-line pt-4">
+          <p className="text-xs text-muted">Already verified?</p>
+          <Link href="/login" className="btn btn-secondary mt-2 w-full">
+            Return to login
+          </Link>
+        </div>
       </div>
     );
   }

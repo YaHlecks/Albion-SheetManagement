@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { getAppUrl } from "@/lib/app-url";
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
 const ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
@@ -44,14 +45,28 @@ export async function POST(req: Request) {
   }
 
   try {
+    // redirect_to MUST be an allowlisted URL in Supabase → Authentication →
+    // URL Configuration, otherwise Supabase rewrites the link to the Site URL
+    // and the reset flow breaks on deployed domains.
+    const redirectTo = `${getAppUrl()}/auth/callback?next=/reset-password&type=recovery`;
     const resp = await fetch(`${SUPABASE_URL}/auth/v1/recover`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         apikey: ANON_KEY,
       },
-      body: JSON.stringify({ email: emailStr }),
+      body: JSON.stringify({ email: emailStr, redirect_to: redirectTo }),
     });
+
+    if (!resp.ok && resp.status !== 422) {
+      // 422 ("user not found") is intentionally swallowed: the response must
+      // not reveal whether an email is registered. Other failures surface.
+      console.error("[auth] recover request failed:", resp.status, await safeText(resp));
+      return NextResponse.json(
+        { message: "Could not send the reset email. Please try again later." },
+        { status: 502 }
+      );
+    }
 
     // Deliberately do not reveal whether the address exists.
     return NextResponse.json({ message: "OK" });
@@ -60,5 +75,13 @@ export async function POST(req: Request) {
       { message: "Could not send the reset email. Please try again later." },
       { status: 502 }
     );
+  }
+}
+
+async function safeText(resp: Response): Promise<string> {
+  try {
+    return (await resp.text()).slice(0, 300);
+  } catch {
+    return "";
   }
 }

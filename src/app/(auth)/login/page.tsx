@@ -6,8 +6,10 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Eye, EyeOff } from "lucide-react";
 import { createBrowserClient } from "@/lib/supabase-browser";
 import { loginSchema, fieldErrors } from "@/lib/validation";
+import { mapSignInError } from "@/lib/auth-state";
 import { Button } from "@/components/ui";
 import { useToast } from "@/components/toast";
+import { ResendVerification } from "@/components/resend-verification";
 
 function LoginForm() {
   const router = useRouter();
@@ -22,11 +24,14 @@ function LoginForm() {
       ? "Authentication is not configured on this deployment. Set NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY."
       : null
   );
+  /** When sign-in fails with "Email not confirmed", show the resend block. */
+  const [showResend, setShowResend] = useState(false);
   const [loading, setLoading] = useState(false);
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     setBanner(null);
+    setShowResend(false);
     const parsed = loginSchema.safeParse({ email, password });
     if (!parsed.success) {
       setErrors(fieldErrors(parsed));
@@ -43,24 +48,32 @@ function LoginForm() {
       });
 
       if (error) {
-        if (error.status === 400) {
-          setBanner("Invalid email or password.");
-        } else if (error.status === 422) {
-          setBanner("Invalid email or password.");
-        } else if (error.status === 429) {
-          setBanner("Too many attempts. Please wait a moment and try again.");
-        } else {
-          setBanner("Could not sign you in. Please try again.");
+        // §15: distinguish authentication failure from email-not-verified.
+        // "Email not confirmed" is HTTP 400 — identical status to bad
+        // credentials — so the message must be inspected (mapSignInError).
+        const mapped = mapSignInError(error.status, error.message);
+        switch (mapped.kind) {
+          case "email_not_verified":
+            setBanner("Email not verified — please verify your email address before signing in.");
+            setShowResend(true);
+            return;
+          case "rate_limited":
+            setBanner("Too many attempts. Please wait a moment and try again.");
+            return;
+          case "invalid_credentials":
+            setBanner("Invalid email or password.");
+            return;
+          default:
+            setBanner("Could not sign you in. Please try again.");
+            return;
         }
-        return;
       }
 
-      // ---- AUTH INITIALIZING → SESSION LOADED → PROFILE LOADING → PROFILE
-      // ---- LOADED → ROLE+STATUS VERIFIED → ROUTE DECISION (§5 state machine)
+      // ---- SESSION LOADED → PROFILE RESOLVED → ROUTE DECISION ---------------
       // Self-heal 1/2: if the signup trigger has not created the profile yet
       // (race on a brand-new account), the definer RPC provisions it now
       // from the verified JWT. A DB failure here is NOT "pending" — keep the
-      // session and surface a distinct profile-error state (§7).
+      // session and surface a distinct profile-error state (§16/§17).
       const { data: ensured, error: ensureError } = await supabase.rpc("ensure_profile");
       if (ensureError || !ensured?.ok) {
         console.error("[auth] ensure_profile failed:", ensureError?.message ?? ensured?.error);
@@ -74,12 +87,10 @@ function LoginForm() {
       // no administrator exists. Idempotent for everyone else.
       const { data: claim } = await supabase.rpc("claim_first_admin");
       if (claim?.promoted) {
-        console.info(
-          `[auth] first-admin self-heal applied: role=ADMIN status=${claim.status}`
-        );
+        console.info(`[auth] first-admin self-heal applied: role=ADMIN status=${claim.status}`);
       }
 
-      // Fresh, authoritative read (never cached client state, §9).
+      // Fresh, authoritative read (never cached client state).
       const { data: profile, error: profileError } = await supabase
         .from("profiles")
         .select("status, is_platform_admin")
@@ -87,7 +98,7 @@ function LoginForm() {
         .maybeSingle();
 
       if (profileError || !profile) {
-        // PROFILE_ERROR ≠ PENDING (§4/§5): log the real cause, keep the
+        // PROFILE_ERROR ≠ PENDING (§16/§17): log the real cause, keep the
         // session, show a distinct state with a retry instead of falsely
         // telling an admin their account is unapproved.
         if (profileError) console.error("[auth] profile load failed:", profileError.message);
@@ -102,8 +113,10 @@ function LoginForm() {
       );
 
       if (status !== "approved" && status !== "active") {
-        // Legit non-approved states only — this branch is now unreachable for
-        // profile-loading/DB-error cases (handled above).
+        // Legit non-approved states only — unreachable for profile-loading /
+        // DB-error cases (handled above). Note: an unverified EMAIL can no
+        // longer reach this point, so /pending-approval is never shown for
+        // verification problems.
         router.replace(`/pending-approval?status=${encodeURIComponent(status)}`);
         return;
       }
@@ -135,6 +148,10 @@ function LoginForm() {
         <div className="form-banner form-banner-error mt-5" role="alert">
           {banner}
         </div>
+      ) : null}
+
+      {showResend ? (
+        <ResendVerification email={email.trim()} className="mt-4" />
       ) : null}
 
       <form onSubmit={handleSubmit} className="mt-6 space-y-4" noValidate>

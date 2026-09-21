@@ -1,19 +1,26 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { Suspense, useState, type FormEvent } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { createBrowserClient } from "@/lib/supabase-browser";
 import { resetSchema, fieldErrors } from "@/lib/validation";
 import { Button } from "@/components/ui";
 
-export default function ResetPasswordPage() {
+function ResetPasswordForm() {
   const router = useRouter();
+  const params = useSearchParams();
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [banner, setBanner] = useState<string | null>(
-    typeof window !== "undefined" && window.location.search.includes("error=invalid")
+    // React #418 FIX: the previous implementation read
+    // `window.location.search` inside useState's initializer. That executes
+    // during render: the server rendered `null` while the client rendered
+    // the error banner, producing a hydration mismatch (minified React
+    // error #418). useSearchParams() is hydration-safe — Next.js fills it
+    // in identically on both sides.
+    params.get("error") === "invalid"
       ? "This reset link is invalid or has expired. Request a new one."
       : null
   );
@@ -91,5 +98,13 @@ export default function ResetPasswordPage() {
         <Link href="/login" className="link-brand">Back to login</Link>
       </p>
     </div>
+  );
+}
+
+export default function ResetPasswordPage() {
+  return (
+    <Suspense fallback={<div className="auth-card text-sm text-muted">Loading…</div>}>
+      <ResetPasswordForm />
+    </Suspense>
   );
 }

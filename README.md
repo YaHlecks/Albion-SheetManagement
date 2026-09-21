@@ -28,6 +28,7 @@ npm run dev                  # http://localhost:3000
 | --- | --- | --- |
 | `NEXT_PUBLIC_SUPABASE_URL` | yes | Supabase project URL |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | yes | Supabase anon key — safe because RLS is enforced on every table |
+| `NEXT_PUBLIC_APP_URL` | yes | Canonical origin embedded in email links. Falls back to `VERCEL_URL`, then `http://localhost:3000`. Must be allowlisted in Supabase → URL Configuration |
 | `SUPABASE_SERVICE_ROLE_KEY` | **no** | Server-only admin operations (fast path). If unset, the app runs in *fallback mode* and performs privileged writes through `security definer` RPCs that re-verify admin rights in the database |
 | `DATABASE_URL` | no | Postgres connection string used by `npm run db:push` only |
 
@@ -50,10 +51,43 @@ npm run db:bootstrap -- you@example.com
 ## The Complete Chain
 
 ```
-REGISTER → AUTHENTICATE → ACCOUNT APPROVAL → TEAM ASSIGNMENT →
+REGISTER → VERIFY EMAIL → AUTHENTICATE → ACCOUNT APPROVAL → TEAM ASSIGNMENT →
 TEAM ACCESS → SHEET EDITING → AUTOMATIC CHANGE TRACKING →
 ADMIN REVIEW → MODERATION / REVERT / LOCK
 ```
+
+### Email verification vs password recovery vs account approval
+
+Three strictly separated concepts:
+
+1. **Email verification** — proves the address is owned. Decided **only** by
+   Supabase (`auth.users.email_confirmed_at`). Flow: register → *Check your
+   email* screen (resend with 60s cooldown) → click **Verify My Account** in
+   the branded email → `/auth/callback` exchanges the code (PKCE) →
+   `/verify-email` shows **Email verified!** plus the truthful account state
+   (first account: *admin + active*; others: *approval pending*). Expired or
+   already-used links get a dedicated *link invalid or expired* state with
+   resend — never a crash and never the reset form.
+2. **Password recovery** — separate flow: *Forgot password?* → rate-limited
+   `/api/auth/recover` (explicit, env-based `redirect_to`) → **Reset
+   Password** email (blue, visually distinct) → `/auth/callback?…type=recovery`
+   → `/reset-password`. The callback separates the flows by the link's `type`
+   parameter, so a verification link can never open the reset form and vice
+   versa.
+3. **Account approval** — `profiles.status` (`pending → approved`, plus
+   `rejected/suspended/archived`), managed by admins. A verified email is
+   never reported as an approved account. A profile/database failure is a
+   distinct PROFILE_ERROR state, never "pending".
+
+Unverified users who try to sign in get *"Email not verified — please verify
+your email address before signing in"* with an inline resend block (the
+sign-in error mapper inspects the message because Supabase returns `Email not
+confirmed` as HTTP 400, the same status as bad credentials). They are never
+routed to `/pending-approval` for verification problems.
+
+Professional HTML email templates for Supabase (Auth → Emails → Templates)
+and the full Supabase configuration checklist live in
+[`supabase/email-templates/`](supabase/email-templates/README.md).
 
 Every step is enforced **server-side** (database RLS + security-definer RPCs + server route guards), never only in the UI.
 
@@ -64,7 +98,8 @@ src/
   app/
     page.tsx                  public landing page
     (auth)/                   login, register, forgot/reset password
-    auth/callback/            recovery/confirmation code exchange
+    verify-email/             dedicated email-verification experience (per-state)
+    auth/callback/            confirmation/recovery code exchange (flow-aware)
     (app)/                    authenticated shell (guarded layout)
       dashboard/              member dashboard
       teams/                  member teams + team sheet (core feature)
@@ -110,7 +145,7 @@ middleware.ts                 session refresh + route protection (Node runtime)
 
 1. Import the repo in Vercel — framework preset **Next.js** (build `npm run build`; output is managed by Next.js, no public/ output dir).
 2. Set env vars for Production + Preview: `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY` (recommended).
-3. In Supabase → Authentication → URL Configuration, add your Vercel domain(s) as Site URL / Redirect URLs (used by password-reset links).
+3. In Supabase → Authentication → URL Configuration, add your Vercel domain(s) as Site URL / Redirect URLs — **including preview domains and `http://localhost:3000`**. Set `NEXT_PUBLIC_APP_URL` to the production URL (and the preview URL for Preview). See [`supabase/email-templates/README.md`](supabase/email-templates/README.md) for the full checklist (templates, confirmation ON, SMTP).
 4. Deploy. `middleware.ts` runs on the Node.js runtime so `@supabase/ssr` cookie handling works on Vercel.
 
 ## Testing Performed
@@ -127,4 +162,5 @@ middleware.ts                 session refresh + route protection (Node runtime)
 - Sessions are httpOnly JWT cookies managed by Supabase Auth; middleware uses `getUser()` (server-verified) rather than trusting cookie contents.
 - Admin status lives in `profiles.is_platform_admin` and is checked server-side on every admin route/endpoint — it cannot be toggled from the browser.
 - Password recovery is rate-limited and never reveals whether an email is registered.
+- Email verification stays enabled; the verification link only confirms the address — it never resets passwords, and its callback is separate from the recovery callback.
 - Status transitions are validated in the database (e.g. only `approved` accounts can be suspended; only `pending` can be rejected).

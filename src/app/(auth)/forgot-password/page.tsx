@@ -20,13 +20,10 @@ export default function ForgotPasswordPage() {
     setBanner(null);
     setLoading(true);
     try {
-      const redirectTo =
-        typeof window !== "undefined"
-          ? `${window.location.origin}/auth/callback?next=/reset-password`
-          : undefined;
-
       // Rate-limited, server-proxied request. The response does not reveal
-      // whether the address exists — no account enumeration.
+      // whether the address exists — no account enumeration. The reset
+      // redirect URL is decided server-side (env-based, allowlisted in
+      // Supabase) so it is correct on every deployment, not just this origin.
       const res = await fetch("/api/auth/recover", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
