@@ -75,13 +75,17 @@ export async function POST(req: Request) {
       p_member_id: typeof memberId === "string" && memberId ? memberId : null,
       p_payload:
         payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {},
+      // Trusted-server attribution: the admin_action RPC uses this ONLY when
+      // auth.uid() is null (service-role call from this server). The id comes
+      // from the server-verified session above — never from the request body.
+      p_actor_id: ctx.userId,
     };
 
     let result: { ok?: boolean; error?: string; id?: string } | null = null;
 
     if (hasServiceRole()) {
-      // Direct DB write via service role for full audit context (JWT claim is
-      // absent). We write audit rows explicitly below with the actor id.
+      // Service-role path: bypasses RLS; the RPC still validates the action
+      // and the triggers stamp audit rows using p_actor_id.
       const admin = createAdminClient();
       const { data, error } = await admin.rpc("admin_action", params);
       if (error) {
@@ -90,7 +94,7 @@ export async function POST(req: Request) {
       }
       result = data;
     } else {
-      // Anon-key mode: the RPC enforces the admin check internally.
+      // Anon-key mode: the RPC enforces the admin check internally (user JWT).
       const { data, error } = await supabase.rpc("admin_action", params);
       if (error) {
         console.error("[admin] action failed", action, error.message);

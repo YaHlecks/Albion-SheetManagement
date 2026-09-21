@@ -90,8 +90,9 @@ export function AppShell({ user, children }: { user: ShellUser; children: React.
           .order("created_at", { ascending: false })
           .limit(12);
         if (error || cancelled) return;
-        setNotifications((data ?? []) as NotificationItem[]);
-        setUnread((data ?? []).filter((n) => !n.read).length);
+        const rows = (data ?? []) as NotificationItem[];
+        setNotifications(rows);
+        setUnread(rows.filter((n) => !n.read).length);
       } finally {
         if (!cancelled) setLoadingNotifs(false);
       }

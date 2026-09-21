@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "db:push": "node scripts/db-push.mjs",
+    "db:bootstrap": "node scripts/db-bootstrap.mjs",
     "lint": "tsc --noEmit"
   },
   "dependencies": {

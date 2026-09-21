@@ -15,6 +15,7 @@ Team sheet management platform for Albion Online guilds — controlled team shee
 npm install
 cp .env.example .env.local   # fill in the values (see below)
 npm run db:push              # create schema, triggers, policies (needs DATABASE_URL)
+npm run db:bootstrap -- you@example.com   # promote your admin account (one-time)
 npm run dev                  # http://localhost:3000
 ```
 
@@ -33,13 +34,15 @@ npm run dev                  # http://localhost:3000
 
 Secrets are never committed (`.env*` is git-ignored) and the service-role key is only read in server modules guarded against browser use.
 
-### First administrator
+### First administrator (one-time bootstrap)
 
-The **first account to register becomes the platform administrator automatically** (the signup trigger does this). To promote an existing user instead:
+Admin rights are **never** granted automatically — "first registered user becomes admin" would hand the platform to whoever registers first. Instead, register your admin account normally through `/register`, then run the one-time bootstrap script:
 
-```sql
-update public.profiles set is_platform_admin = true where id = '<auth user uuid>';
+```bash
+npm run db:bootstrap -- you@example.com
 ```
+
+(Or paste `supabase/bootstrap-admin.sql` into the Supabase SQL Editor after editing the email at the top.) The script verifies the account exists in `auth.users`, provisions the profile if needed, promotes it to `is_platform_admin`, approves it, and writes an auditable `PERMISSION_CHANGED` event. It never creates credentials and is idempotent. Additional admins are then promoted from the UI (Admin → Members → Grant admin), enforced inside the `admin_action` RPC.
 
 ## The Complete Chain
 
@@ -79,10 +82,13 @@ middleware.ts                 session refresh + route protection (Node runtime)
 
 ### Database security model
 
-- **RLS on every table.** Members read only their teams; pending/suspended/rejected accounts read only their own profile row.
-- **No client writes to protected tables.** `audit_logs` and `notifications` have no insert/update/delete policies — writes happen exclusively via triggers and `security definer` RPCs.
-- **`admin_action` RPC** performs privileged operations with the admin check *inside* the function (works in both service-role and fallback modes).
+- **RLS on every table, recursion-free.** Every cross-table authorization check in a policy goes through a `security definer` helper (`is_platform_admin()`, `is_team_member()`, `is_team_editable()`, `shares_team_with_me()`), which evaluates as the table owner and therefore never re-enters RLS. Policies never query their own table — the classic cause of Postgres `42P17: infinite recursion detected in policy`.
+- **Every operation gets its own policy** (SELECT/INSERT/UPDATE/DELETE separated per table); there is no broad one-size-fits-all policy.
+- **No client writes to protected tables.** `audit_logs` has a single admin-only SELECT policy and no write policies; `notifications` are scoped to their owner. Privileged writes flow exclusively through `security definer` RPCs and DB triggers.
+- **Members never read `audit_logs` directly.** The dashboard uses the `recent_own_activity()` definer RPC, which returns only events where the caller is the actor or the target.
+- **`admin_action` RPC** performs privileged operations with the admin check *inside* the function. In service-role mode the application server passes `p_actor_id` from its own server-verified session so audit rows still carry the real acting admin — the browser can never supply it.
 - **`update_member_field` RPC** re-validates membership, account status, team status and sheet lock atomically on every cell save — the frontend is a convenience, not the gate.
+- **Hardened RPCs.** `log_audit` rejects actions the database records automatically and restricts everything else to admins (logout excepted); `notify_user` is admin/server-only so members cannot spoof notifications; `ensure_profile` provisions a missing profile on first login using the verified JWT identity only, and can never grant admin.
 - **Append-only audit trail.** Field changes record actor, target, team, field, previous value and new value. Reverts restore the value and write a `CHANGE_REVERTED` event; nothing is ever edited or deleted.
 - **Account lifecycle**: `pending → approved → suspended/reactivated → archived` (soft delete; history preserved), plus `rejected`. Account approval and team membership are independent.
 
@@ -93,8 +99,9 @@ middleware.ts                 session refresh + route protection (Node runtime)
 | `npm run dev` | Start dev server |
 | `npm run build` | Production build (must pass strict typecheck) |
 | `npm run typecheck` | `tsc --noEmit` |
-| `npm test` | Vitest unit tests (validation + permission logic) |
+| `npm test` | Vitest unit tests (validation + permission logic + DB policy regression guards) |
 | `npm run db:push` | Apply `supabase/migrations/*.sql` via `DATABASE_URL` |
+| `npm run db:bootstrap -- email` | One-time: promote a registered account to platform admin |
 
 ## Deployment (Vercel)
 
@@ -106,9 +113,11 @@ middleware.ts                 session refresh + route protection (Node runtime)
 ## Testing Performed
 
 - `npm run typecheck` — strict, zero errors
-- `npm test` — 19 unit tests (validation schemas, permission matrix mirroring the DB RPC rules)
+- `npm test` — 43 unit tests: validation schemas, permission matrix mirroring the DB RPC rules, and 24 static regression guards over the SQL migration (no policy queries its own table → 42P17 cannot return; RLS enabled + grants restricted on every table; audit RPC hardening; bootstrap invariants)
 - `npm run build` — production build passes, 25 routes
 - Workflow checks: register → pending gate → approve → team assignment → sheet editing → audit trail → revert → lock → suspend
+
+> Behavioral RLS testing against a live Postgres (probe queries as anon/pending/member/admin roles) requires a real Supabase project; run `npm run db:push` then exercise the five account contexts listed in `tests/permissions.test.ts`.
 
 ## Security Notes
 

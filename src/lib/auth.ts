@@ -51,10 +51,42 @@ export const getSessionContext = cache(async (): Promise<SessionContext | null> 
         createdAt: data.created_at,
         lastLoginAt: data.last_login_at ?? null,
       };
-      isPlatformAdmin = profile.isPlatformAdmin;
+    } else {
+      // Self-healing first login in service-role mode: provision the missing
+      // profile from the verified user, defaulting to pending/non-admin.
+      const meta = (user.user_metadata ?? {}) as { ign?: string; discord?: string };
+      const ign =
+        meta.ign && meta.ign.trim().length >= 2 && meta.ign.trim().length <= 32
+          ? meta.ign.trim()
+          : `player-${user.id.slice(0, 8)}`;
+      const { data: created } = await admin
+        .from("profiles")
+        .upsert(
+          {
+            id: user.id,
+            ign,
+            discord: meta.discord?.trim() || null,
+            status: "pending",
+            is_platform_admin: false,
+          },
+          { onConflict: "id", ignoreDuplicates: true }
+        )
+        .select("id, ign, discord, status, is_platform_admin, created_at, last_login_at")
+        .maybeSingle();
+      if (created) {
+        profile = {
+          id: created.id,
+          ign: created.ign,
+          discord: created.discord ?? null,
+          status: created.status as AccountStatus,
+          isPlatformAdmin: Boolean(created.is_platform_admin),
+          createdAt: created.created_at,
+          lastLoginAt: created.last_login_at ?? null,
+        };
+      }
     }
   } else {
-    // Fallback: RLS-visible profile row + security-definer admin RPC.
+    // Anon-key mode: read the caller's own profile row through RLS.
     const { data: row } = await supabase
       .from("profiles")
       .select("id, ign, discord, status, is_platform_admin, created_at, last_login_at")
@@ -70,9 +102,40 @@ export const getSessionContext = cache(async (): Promise<SessionContext | null> 
         createdAt: row.created_at,
         lastLoginAt: row.last_login_at ?? null,
       };
+    } else {
+      // Self-healing first login: authentication succeeded but the profile
+      // row does not exist yet (signup-trigger race/failure). The definer RPC
+      // provisions it from the verified JWT identity — never from client
+      // data — and reports the authoritative status/admin flags back.
+      const { data: ensured } = await supabase.rpc("ensure_profile");
+      if (ensured && ensured.ok) {
+        const { data: created } = await supabase
+          .from("profiles")
+          .select("id, ign, discord, status, is_platform_admin, created_at, last_login_at")
+          .eq("id", user.id)
+          .maybeSingle();
+        if (created) {
+          profile = {
+            id: created.id,
+            ign: created.ign,
+            discord: created.discord ?? null,
+            status: created.status as AccountStatus,
+            isPlatformAdmin: Boolean(created.is_platform_admin),
+            createdAt: created.created_at,
+            lastLoginAt: created.last_login_at ?? null,
+          };
+        }
+      }
     }
+  }
+
+  // Authoritative admin check from inside the database (definer function
+  // reading profiles). Belt-and-braces with the profile row above.
+  if (!hasServiceRole()) {
     const { data: flag } = await supabase.rpc("is_platform_admin");
     isPlatformAdmin = flag === true || (profile?.isPlatformAdmin ?? false);
+  } else {
+    isPlatformAdmin = profile?.isPlatformAdmin ?? false;
   }
 
   return {

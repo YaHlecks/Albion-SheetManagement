@@ -55,7 +55,16 @@ function LoginForm() {
         return;
       }
 
-      // Resolve account status before entering the app.
+      // Self-heal: if the signup trigger has not created the profile yet
+      // (race on a brand-new account), the definer RPC provisions it now
+      // from the verified JWT. Then read the authoritative status.
+      const { data: ensured, error: ensureError } = await supabase.rpc("ensure_profile");
+      if (ensureError || !ensured?.ok) {
+        setBanner("Could not verify your account. Please try again.");
+        await supabase.auth.signOut();
+        return;
+      }
+
       const { data: profile, error: profileError } = await supabase
         .from("profiles")
         .select("status")
@@ -68,25 +77,18 @@ function LoginForm() {
         return;
       }
 
-      if (profile.status === "pending") {
-        await supabase.auth.signOut();
-        router.replace("/pending-approval?status=pending");
-        return;
-      }
-      if (profile.status === "suspended") {
-        await supabase.auth.signOut();
-        router.replace("/pending-approval?status=suspended");
-        return;
-      }
-      if (profile.status === "rejected") {
-        await supabase.auth.signOut();
-        router.replace("/pending-approval?status=rejected");
+      if (profile.status !== "approved" && profile.status !== "active") {
+        // Keep the session (middleware treats /pending-approval as public and
+        // the page prefers the live DB status). Signing out here caused a
+        // bounce loop for pending users; this screen explains the state.
+        router.replace(`/pending-approval?status=${encodeURIComponent(String(profile.status))}`);
         return;
       }
 
+      // Record login time + USER_LOGIN audit event before navigating.
+      await supabase.rpc("touch_login");
+
       toast.success("Signed in. Welcome back!");
-      // Record login time + USER_LOGIN audit event (fire-and-forget).
-      void supabase.rpc("touch_login");
       const next = params.get("next");
       router.replace(next && next.startsWith("/") ? next : "/dashboard");
       router.refresh();

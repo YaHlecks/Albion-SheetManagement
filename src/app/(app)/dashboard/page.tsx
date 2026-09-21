@@ -2,9 +2,8 @@ import Link from "next/link";
 import { ClipboardList, Bell, ChevronRight, History } from "lucide-react";
 import { requirePageSession } from "@/lib/api";
 import { createSupabaseServerClient } from "@/lib/supabase-server";
-import { createAdminClient, hasServiceRole } from "@/lib/supabase-admin";
 import { Badge, EmptyState, StatCard } from "@/components/ui";
-import { formatDateTime, timeAgo } from "@/lib/utils";
+import { timeAgo } from "@/lib/utils";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Dashboard" };
@@ -17,6 +16,32 @@ interface TeamCard {
   description: string | null;
   member_count: number;
   my_role: string;
+}
+
+export interface OwnActivityRow {
+  id: string;
+  action: string;
+  created_at: string;
+  meta: Record<string, unknown> | null;
+  team_name: string | null;
+}
+
+/**
+ * Members may not read the audit_logs table (admin-only by RLS). The
+ * security-definer recent_own_activity RPC returns only events where the
+ * caller is the actor or the target — the database does the filtering.
+ */
+async function fetchMemberActivity(
+  supabase: Awaited<ReturnType<typeof createSupabaseServerClient>>,
+  limit = 8
+): Promise<OwnActivityRow[]> {
+  const { data, error } = await supabase.rpc("recent_own_activity", { p_limit: limit });
+  if (error) {
+    // Never break the dashboard over activity listing.
+    console.error("[dashboard] recent_own_activity failed", error.message);
+    return [];
+  }
+  return (data ?? []) as OwnActivityRow[];
 }
 
 export default async function MemberDashboard() {
@@ -48,27 +73,7 @@ export default async function MemberDashboard() {
     });
   }
 
-  // Recent audit events about me (needs admin or falls back to RPC).
-  let recentActivity: { id: string; action: string; created_at: string; meta: Record<string, unknown> }[] = [];
-  if (hasServiceRole()) {
-    const admin = createAdminClient();
-    const { data } = await admin
-      .from("audit_logs")
-      .select("id, action, created_at, meta")
-      .eq("actor_id", ctx.userId)
-      .order("created_at", { ascending: false })
-      .limit(6);
-    recentActivity = data ?? [];
-  } else {
-    const { data } = await supabase
-      .from("audit_logs")
-      .select("id, action, created_at, meta")
-      .eq("actor_id", ctx.userId)
-      .order("created_at", { ascending: false })
-      .limit(6);
-    recentActivity = data ?? [];
-  }
-
+  const recentActivity = await fetchMemberActivity(supabase, 8);
   const openTeams = teams.filter((t) => t.status === "open").length;
 
   return (
@@ -88,7 +93,7 @@ export default async function MemberDashboard() {
         <StatCard label="Open sheets" value={openTeams} tone="success" />
         <StatCard
           label="Pending actions"
-          value={teams.filter((t) => t.status === "open").length > 0 ? "Fill sheet" : "None"}
+          value={openTeams > 0 ? "Fill sheet" : "None"}
         />
       </div>
 
@@ -146,7 +151,7 @@ export default async function MemberDashboard() {
             <ul className="divide-y divide-line">
               {recentActivity.map((a) => (
                 <li key={a.id} className="flex items-center justify-between gap-3 py-2.5 text-sm">
-                  <span className="min-w-0 truncate text-ink">{describeActivity(a.action, a.meta)}</span>
+                  <span className="min-w-0 truncate text-ink">{describeActivity(a.action, a.meta ?? {})}</span>
                   <span className="shrink-0 text-xs text-faint">{timeAgo(a.created_at)}</span>
                 </li>
               ))}
@@ -175,12 +180,15 @@ function describeActivity(action: string, meta: Record<string, unknown>): string
   switch (action) {
     case "USER_LOGIN": return "Signed in";
     case "USER_REGISTERED": return "Registered an account";
+    case "USER_APPROVED": return "Account approved";
+    case "USER_SUSPENDED": return "Account suspended";
     case "FIELD_UPDATED":
       return `Updated ${String(meta.field ?? "field")}${
         meta.previous ? `: ${String(meta.previous)} → ${String(meta.new)}` : ""
       }`;
     case "MEMBER_ADDED": return `Added to ${String(meta.team_name ?? "a team")}`;
     case "MEMBER_REMOVED": return `Removed from ${String(meta.team_name ?? "a team")}`;
+    case "CHANGE_REVERTED": return `Reverted ${String(meta.field ?? "a field")}`;
     default: return action.replaceAll("_", " ").toLowerCase();
   }
 }
