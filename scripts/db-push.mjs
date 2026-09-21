@@ -35,12 +35,24 @@ const client = new Client({
 
 await client.connect();
 
+// Migration tracking: every applied file is recorded in a local table so a
+// partially-applied database (the cause of the 42501 grant drift) is visible
+// instead of silent.
+await client.query(
+  "create table if not exists public.schema_migrations (name text primary key, applied_at timestamptz not null default now())"
+);
+
 for (const file of files) {
+  const { rows: seen } = await client.query("select 1 from public.schema_migrations where name = $1", [file]);
   const sql = readFileSync(join(dir, file), "utf8");
-  process.stdout.write(`Applying ${file}… `);
+  process.stdout.write(`${seen.length ? "Re-verifying" : "Applying"} ${file}… `);
   try {
     await client.query(sql);
-    console.log("done.");
+    await client.query(
+      "insert into public.schema_migrations (name) values ($1) on conflict (name) do nothing",
+      [file]
+    );
+    console.log(seen.length ? "ok (idempotent)." : "done.");
   } catch (err) {
     console.log("FAILED.");
     console.error(err.message);

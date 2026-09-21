@@ -11,6 +11,7 @@
     "test": "vitest run",
     "db:push": "node scripts/db-push.mjs",
     "db:bootstrap": "node scripts/db-bootstrap.mjs",
+    "db:doctor": "node scripts/db-doctor.mjs",
     "lint": "tsc --noEmit"
   },
   "dependencies": {
