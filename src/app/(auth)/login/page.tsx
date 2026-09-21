@@ -6,7 +6,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Eye, EyeOff } from "lucide-react";
 import { createBrowserClient } from "@/lib/supabase-browser";
 import { loginSchema, fieldErrors } from "@/lib/validation";
-import { mapSignInError } from "@/lib/auth-state";
+import { mapSignInError, classifyProfileError } from "@/lib/auth-state";
 import { Button } from "@/components/ui";
 import { useToast } from "@/components/toast";
 import { ResendVerification } from "@/components/resend-verification";
@@ -76,8 +76,14 @@ function LoginForm() {
       // session and surface a distinct profile-error state (§16/§17).
       const { data: ensured, error: ensureError } = await supabase.rpc("ensure_profile");
       if (ensureError || !ensured?.ok) {
-        console.error("[auth] ensure_profile failed:", ensureError?.message ?? ensured?.error);
-        router.replace("/pending-approval?error=profile-db");
+        // §14: classify precisely — 42501 (permission denied) is a grants/RLS
+        // misconfiguration and must NEVER surface as pending/unverified.
+        const kind = classifyProfileError(ensureError?.code, ensureError?.message);
+        console.error(
+          `[auth] ensure_profile failed (${kind}):`,
+          ensureError?.message ?? ensured?.error
+        );
+        router.replace(`/pending-approval?error=${kind === "PROFILE_PERMISSION_DENIED" ? "profile-permission" : "profile-db"}`);
         return; // session deliberately kept — error state, not a logout
       }
 
@@ -98,11 +104,14 @@ function LoginForm() {
         .maybeSingle();
 
       if (profileError || !profile) {
-        // PROFILE_ERROR ≠ PENDING (§16/§17): log the real cause, keep the
-        // session, show a distinct state with a retry instead of falsely
-        // telling an admin their account is unapproved.
-        if (profileError) console.error("[auth] profile load failed:", profileError.message);
-        router.replace("/pending-approval?error=profile-db");
+        // PROFILE_ERROR ≠ PENDING (§14): classify the failure, log the real
+        // cause, keep the session, and show a distinct state with a retry
+        // instead of falsely telling an admin their account is unapproved.
+        const kind = classifyProfileError(profileError?.code, profileError?.message);
+        console.error(`[auth] profile load failed (${kind}):`, profileError?.message);
+        router.replace(
+          `/pending-approval?error=${kind === "PROFILE_PERMISSION_DENIED" ? "profile-permission" : "profile-db"}`
+        );
         return;
       }
 

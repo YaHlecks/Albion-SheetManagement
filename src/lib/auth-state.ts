@@ -164,3 +164,32 @@ export function mapSignInError(status: number | undefined, message: string | und
 
 /** Cooldown (seconds) between two verification-email requests (anti-spam). */
 export const RESEND_COOLDOWN_SECONDS = 60;
+
+/**
+ * §14 — Profile-read failures are infrastructure errors and must NEVER be
+ * misclassified as PENDING_APPROVAL / EMAIL_UNVERIFIED / REJECTED.
+ *
+ * Postgres/PostgREST error codes observed in this app:
+ *   42501 — permission denied for table profiles   (RLS/grant misconfig)
+ *   42P01 — relation does not exist                 (schema not migrated)
+ *   PGRST… — PostgREST transport-level problems     (generic database error)
+ * A *missing row* (no error, zero rows) is PROFILE_NOT_FOUND — the app
+ * self-heals it via ensure_profile; only a failed heal surfaces it.
+ */
+export type ProfileErrorKind =
+  | "PROFILE_NOT_FOUND"
+  | "PROFILE_PERMISSION_DENIED"
+  | "DATABASE_ERROR";
+
+export function classifyProfileError(
+  code?: string | null,
+  message?: string | null
+): ProfileErrorKind {
+  const c = (code ?? "").toUpperCase();
+  const m = (message ?? "").toLowerCase();
+  if (c === "42501" || m.includes("permission denied")) return "PROFILE_PERMISSION_DENIED";
+  if (c === "42P01" || m.includes("does not exist") || m.includes("schema cache")) {
+    return "DATABASE_ERROR"; // missing table/function = migration problem
+  }
+  return "DATABASE_ERROR";
+}

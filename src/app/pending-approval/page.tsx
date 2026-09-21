@@ -44,10 +44,14 @@ export default async function PendingApprovalPage({
     data: { user },
   } = await supabase.auth.getUser();
 
-  // PROFILE_ERROR state (§5/§7): the profile row could not be loaded (RLS/
-  // database failure) — this is NOT "pending approval" and must not present
-  // as one. Distinct copy + explicit retry back to the guarded route.
-  if (sp.error === "profile-db") {
+  // PROFILE_ERROR states (§14): the profile row could not be loaded. These
+  // are infrastructure errors — NOT "pending approval" — and must never
+  // present as one. The two causes are distinguished:
+  //   profile-permission → 42501 permission denied: grants/RLS misconfig
+  //                        (operator must apply migrations/0002 repair).
+  //   profile-db         → any other database/schema failure.
+  if (sp.error === "profile-db" || sp.error === "profile-permission") {
+    const permission = sp.error === "profile-permission";
     return (
       <div className="flex min-h-screen items-center justify-center bg-bg px-4">
         <div className="auth-card text-center">
@@ -57,11 +61,25 @@ export default async function PendingApprovalPage({
           <span className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-danger-soft text-danger">
             <TriangleAlert size={22} />
           </span>
-          <h1 className="font-display text-2xl font-bold tracking-tight">We couldn't load your account</h1>
+          <h1 className="font-display text-2xl font-bold tracking-tight">
+            {permission ? "Account access is misconfigured" : "We couldn't load your account"}
+          </h1>
           <p className="mt-3 text-sm leading-relaxed text-muted">
-            Your session is active, but your account profile could not be read from the database.
-            This is a temporary error — not an approval status. Try again; if it persists, an
-            administrator should check the application logs.
+            {permission ? (
+              <>
+                Your session is active, but the database denied access to your profile
+                (permission denied). This is a deployment configuration problem —
+                not an approval status and not a problem with your account. An
+                administrator must apply the latest database migrations
+                (<code className="text-ink">0002_repair_profile_access.sql</code>).
+              </>
+            ) : (
+              <>
+                Your session is active, but your account profile could not be read from the
+                database. This is a temporary error — not an approval status. Try again; if it
+                persists, an administrator should check the application logs.
+              </>
+            )}
           </p>
           <div className="mt-6 flex flex-col gap-2">
             <Link href="/dashboard" className="btn btn-primary w-full">Try again</Link>
