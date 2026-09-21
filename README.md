@@ -52,7 +52,8 @@ npm run db:bootstrap -- you@example.com
 
 ```
 REGISTER → VERIFY EMAIL → AUTHENTICATE → ACCOUNT APPROVAL → TEAM ASSIGNMENT →
-TEAM ACCESS → SHEET EDITING → AUTOMATIC CHANGE TRACKING →
+TEAM ACCESS → MASS SHEETS (parties → roles → builds → IGN slots) →
+REALTIME SLOT FILLING → AUTOMATIC CHANGE TRACKING →
 ADMIN REVIEW → MODERATION / REVERT / LOCK
 ```
 
@@ -90,6 +91,50 @@ and the full Supabase configuration checklist live in
 [`supabase/email-templates/`](supabase/email-templates/README.md).
 
 Every step is enforced **server-side** (database RLS + security-definer RPCs + server route guards), never only in the UI.
+
+## Mass Sheets (Albion mass organization)
+
+The core feature replacing shared Excel/Google Sheets for mass organization.
+
+**Model** (`supabase/migrations/0004_mass_sheets.sql`):
+
+```
+teams → mass_sheets (title, location, set, mass_at timestamptz, instructions,
+        status: draft | published | locked | archived)
+             → mass_parties (name, fill_note, sort_order)
+                  → mass_slots (role, build_name, priority, required, sort_order)
+                       → mass_assignments (UNIQUE slot_id, user_id, ign)
+```
+
+**Admin** — `/admin/sheets`: card list with live fill counters; 5-step builder
+(`/admin/sheets/new`, `/admin/sheets/[id]/edit`) covering mass information →
+parties (add/rename/duplicate/delete, fill notes) → slots (role/build with
+suggestions + free custom text, priority, required, reorder) → team assignment →
+preview. One atomic `save_mass_sheet` RPC saves the whole structure and
+preserves assignments on untouched slots; deleting an assigned slot warns
+first. Lifecycle actions (publish / lock / unlock / archive / restore) and
+`duplicate` (copies structure, never assignments) are separate audited RPCs.
+
+**Member** — team page → *Mass Sheets* → sheet view styled like an Albion
+sheet (MASS LOCATION / SET / MASSING TIME header, instructions panel, party
+tables on desktop, party cards on mobile). Members claim an open slot with a
+prefilled IGN modal, unclaim their own, and see everyone's changes in realtime
+(one Supabase Realtime channel per sheet, cleaned up on unmount).
+
+**Enforcement** — all in the database, verified by `npm run db:doctor`:
+
+| Table | anon | authenticated | writes |
+|---|---|---|---|
+| `mass_sheets` | none | SELECT (team members see published/locked/archived; drafts admin-only) | RPC only |
+| `mass_parties` / `mass_slots` | none | SELECT (visible when sheet visible) | RPC only |
+| `mass_assignments` | none | SELECT + own-row-only on published sheets | RPCs (`claim_mass_slot`, `unclaim_mass_slot`, `admin_set_slot_assignment`) |
+
+Concurrent claims of the same slot are decided by the `UNIQUE(slot_id)`
+constraint; the loser receives `SLOT_TAKEN` and a friendly message. Pending,
+suspended and rejected accounts are rejected by the claim RPC
+(`ACCOUNT_NOT_APPROVED`); non-members by `NOT_TEAM_MEMBER`. Claim, unclaim,
+admin assign/move/clear, publish/lock/archive and structure saves all write
+`audit_logs` rows via the existing append-only audit path.
 
 ## Architecture
 

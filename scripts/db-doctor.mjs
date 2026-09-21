@@ -45,7 +45,9 @@ const client = new Client({
   ssl: url.includes("localhost") || url.includes("127.0.0.1") ? false : { rejectUnauthorized: false },
 });
 
-const TABLES = ["profiles", "teams", "team_members", "notifications", "audit_logs"];
+const TABLES = ["profiles", "teams", "team_members", "notifications", "audit_logs",
+  "mass_sheets", "mass_parties", "mass_slots", "mass_assignments"];
+const MASS_TABLES = ["mass_sheets", "mass_parties", "mass_slots", "mass_assignments"];
 
 /** What the application is supposed to be able to do, per role. */
 const EXPECTED = {
@@ -69,13 +71,13 @@ function report(ok, label, detail) {
  * SET LOCAL ROLE so the probe exactly reproduces PostgREST's privilege
  * context (request.jwt.claims supplies auth.uid() where needed).
  */
-const ROLE_SWITCH: Record<string, string> = {
+const ROLE_SWITCH = {
   anon: "set local role anon;",
   authenticated: "set local role authenticated;",
   service_role: "set local role service_role;",
 };
 
-async function probe(role: string, sql: string, claims?: object) {
+async function probe(role, sql, claims) {
   try {
     await client.query("begin");
     await client.query(ROLE_SWITCH[role] ?? `set local role ${role};`);
@@ -228,6 +230,12 @@ try {
     report(r.ok, `${t} as authenticated: SELECT executes`, r.ok ? `ok (${r.rows?.length ?? 0} rows without session — RLS scopes the rest)` : `${r.code}: ${r.message}`);
   }
 
+  // Mass tables: authenticated must NOT have write grants (RPC-only writes).
+  for (const t of MASS_TABLES) {
+    const r = await probe("authenticated", `insert into public.${t} default values;`);
+    report(!r.ok && r.code === "42501", `${t} as authenticated: INSERT denied (writes go through RPCs)`, !r.ok && r.code === "42501" ? "42501 (correct)" : r.ok ? "UNEXPECTEDLY WRITABLE" : `${r.code} (acceptable, but expected 42501)`);
+  }
+
   // authenticated with a session-shaped JWT claim: policies evaluate.
   const { rows: adminRows } = await client.query(
     `select p.id from public.profiles p where p.is_platform_admin order by p.created_at asc limit 1`
@@ -245,6 +253,20 @@ try {
     // Admin must see team_members (the second failing request).
     const tm = await probe("authenticated", `select id from public.team_members limit 5;`, claims);
     report(tm.ok, "team_members readable by admin session (the failing request)", tm.ok ? `${tm.rows?.length} rows visible` : `${tm.code}: ${tm.message}`);
+
+    // Mass-sheet RPCs must be executable by the admin session (grants on functions).
+    const rpcs = [
+      ["claim_mass_slot", "null::uuid, null::text"],
+      ["unclaim_mass_slot", "null::uuid"],
+      ["save_mass_sheet", "null::uuid, null::jsonb"],
+      ["duplicate_mass_sheet", "null::uuid"],
+      ["set_mass_sheet_status", "null::uuid, null::text"],
+      ["admin_set_slot_assignment", "null::uuid, null::uuid, null::text"],
+    ];
+    for (const [fn, args] of rpcs) {
+      const r = await probe("authenticated", `select public.${fn}(${args});`, claims);
+      report(r.ok, `${fn} executable by authenticated`, r.ok ? "granted" : `${r.code}: ${r.message}`);
+    }
   } else {
     console.error("  • No admin profile exists yet — register the first account to complete admin-session probes.");
   }

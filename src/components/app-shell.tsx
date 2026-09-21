@@ -8,6 +8,7 @@ import {
   Bell,
   CheckCheck,
   ClipboardList,
+  ScrollText,
   FolderKanban,
   LayoutDashboard,
   LogOut,
@@ -51,6 +52,7 @@ const adminNav = [
   { href: "/admin/approvals", label: "Approvals", icon: ShieldCheck },
   { href: "/admin/accounts", label: "Members", icon: Users },
   { href: "/admin/teams", label: "Teams", icon: FolderKanban },
+  { href: "/admin/sheets", label: "Mass Sheets", icon: ScrollText },
   { href: "/admin/activity", label: "Activity", icon: Activity },
   { href: "/admin/settings", label: "Settings", icon: Settings },
 ];

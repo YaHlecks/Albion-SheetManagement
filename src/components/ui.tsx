@@ -39,9 +39,9 @@ const badgeStyles: Record<string, string> = {
   role: "badge badge-role",
 };
 
-export function Badge({ status, kind }: { status?: string; kind?: "admin" | "role" | "neutral" }) {
+export function Badge({ status, kind, children }: { status?: string; kind?: "admin" | "role" | "neutral"; children?: ReactNode }) {
   const cls = kind ? badgeStyles[kind] : badgeStyles[status ?? "neutral"] ?? badgeStyles.neutral;
-  return <span className={cls}>{status ?? kind}</span>;
+  return <span className={cls}>{children ?? status ?? kind}</span>;
 }
 
 /* ============================ Card / StatCard ============================ */

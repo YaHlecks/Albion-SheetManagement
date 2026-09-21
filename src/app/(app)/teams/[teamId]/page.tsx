@@ -101,11 +101,14 @@ export default async function TeamSheetPage({
             {members.length} {members.length === 1 ? "member" : "members"}
           </p>
         </div>
-        {t.sheet_locked ? (
-          <span className="badge badge-locked text-sm">🔒 Sheet locked</span>
-        ) : (
-          <span className="badge badge-open text-sm">Sheet open</span>
-        )}
+        <div className="flex flex-wrap items-center gap-2">
+          {t.sheet_locked ? (
+            <span className="badge badge-locked text-sm">🔒 Sheet locked</span>
+          ) : (
+            <span className="badge badge-open text-sm">Sheet open</span>
+          )}
+          <Link href={`/teams/${teamId}/sheets`} className="btn btn-secondary btn-sm">Mass Sheets</Link>
+        </div>
       </div>
 
       <SheetTable
