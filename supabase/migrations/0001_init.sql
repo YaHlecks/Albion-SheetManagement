@@ -475,6 +475,9 @@ begin
     return jsonb_build_object('ok', false, 'error', 'FORBIDDEN');
   end if;
 
+  -- DRAFT-ONLY VALIDATION (§5): a draft needs almost nothing. The only hard
+  -- requirement is a usable title; everything else may be empty. Publish-time
+  -- completeness is a separate, stricter gate handled in the UI.
   v_title := nullif(trim(coalesce(p_data->>'title', '')), '');
   if v_title is null or char_length(v_title) < 2 or char_length(v_title) > 120 then
     return jsonb_build_object('ok', false, 'error', 'INVALID_TITLE');
@@ -573,7 +576,9 @@ begin
       end if;
 
       -- Equipment requirements: replace the slot's set wholesale so removals
-      -- and reorders in the builder always match the sheet exactly.
+      -- and reorders in the builder always match the sheet exactly. Free-text
+      -- item names are allowed (§10) — no catalog join, no validation beyond
+      -- length. Empty items are skipped so half-typed rows never error.
       delete from public.event_slot_requirements where slot_id = v_slot_id;
       for v_req_idx in 0 .. coalesce(jsonb_array_length(v_slot->'requirements'), 0) - 1
       loop

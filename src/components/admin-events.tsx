@@ -11,7 +11,7 @@ import { useState } from "react";
 import { Badge, Button, ConfirmDialog, EmptyState } from "@/components/ui";
 import { useToast } from "@/components/toast";
 import { createBrowserClient } from "@/lib/supabase-browser";
-import { duplicateEvent, setEventStatus, type EventRow } from "@/lib/events";
+import { duplicateEvent, EventError, friendlyEventError, setEventStatus, technicalDetail, type EventRow } from "@/lib/events";
 
 const STATUS_LABEL: Record<string, string> = {
   draft: "draft", published: "approved", locked: "locked",
@@ -49,8 +49,10 @@ export function AdminEvents({ events, fillCounts }: {
       toast.success("Done.");
       router.refresh();
     } catch (err) {
-      const code = err instanceof Error && "code" in err ? String((err as { code: unknown }).code) : null;
-      toast.error(code ? `Action failed (${code}).` : "Action failed. Please try again.");
+      console.error("[admin-events] action failed:", err);
+      const code = err instanceof EventError ? err.code : null;
+      const friendly = code ? friendlyEventError(code) : null;
+      toast.error(friendly ? `${friendly} Technical: ${technicalDetail(err)}` : `Action failed. Technical error: ${technicalDetail(err)}`);
     } finally {
       setBusy(false);
       setConfirm(null);

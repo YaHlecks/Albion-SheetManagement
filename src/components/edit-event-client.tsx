@@ -10,7 +10,7 @@ import { useRouter } from "next/navigation";
 import { useToast } from "@/components/toast";
 import { createBrowserClient } from "@/lib/supabase-browser";
 import { EventBuilder } from "@/components/event-builder";
-import { saveEvent, type EventDraft, type SlotPriority } from "@/lib/events";
+import { saveEvent, setEventStatus, technicalDetail, type EventDraft, type SlotPriority } from "@/lib/events";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function EditEventClient({ eventId, event }: { eventId: string; event: any }) {
@@ -20,16 +20,22 @@ export function EditEventClient({ eventId, event }: { eventId: string; event: an
   const [draft, setDraft] = useState<EventDraft>(() => draftFrom(event));
   const [busy, setBusy] = useState(false);
 
-  const save = async (d: EventDraft) => {
+  const save = async (d: EventDraft, thenPublish: boolean) => {
     setBusy(true);
     try {
       await saveEvent(supabase, eventId, d);
-      toast.success("Changes saved.");
+      if (thenPublish) {
+        await setEventStatus(supabase, eventId, "published");
+        toast.success("Event published — members notified.");
+      } else {
+        toast.success("Changes saved.");
+      }
       router.push(`/admin/events/${eventId}`);
       router.refresh();
     } catch (err) {
-      const code = err instanceof Error && "code" in err ? String((err as { code: unknown }).code) : null;
-      toast.error(code ? `Could not save the event (${code}).` : "Could not save the event. Please try again.");
+      console.error("[edit-event] save failed:", err);
+      toast.error(`Unable to save the event. Technical error: ${technicalDetail(err)}`);
+      // No navigation: the edit stays open with all work intact (§32).
     } finally {
       setBusy(false);
     }
@@ -41,7 +47,7 @@ export function EditEventClient({ eventId, event }: { eventId: string; event: an
       onChange={setDraft}
       busy={busy}
       saveLabel="Save changes"
-      onSave={(d) => void save(d)}
+      onSave={(d, publish) => void save(d, publish)}
       onCancel={() => router.push(`/admin/events/${eventId}`)}
     />
   );

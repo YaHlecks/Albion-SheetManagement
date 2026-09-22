@@ -1,15 +1,19 @@
 "use client";
 
 /**
- * Create-event client: owns the builder draft, saves via the save_event RPC,
- * then offers publish. Explicit save strategy — publish is deliberate (§16).
+ * Create-event client: owns the builder draft. Save Draft (minimal validation,
+ * any step) and Publish (strict validation, saves first then transitions the
+ * status) are two deliberate actions. On failure the form is preserved so no
+ * work is lost, and the real error is surfaced (§30/§32).
  */
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { useToast } from "@/components/toast";
 import { createBrowserClient } from "@/lib/supabase-browser";
 import { EventBuilder } from "@/components/event-builder";
-import { emptyDraft, saveEvent, setEventStatus, type EventDraft } from "@/lib/events";
+import {
+  emptyDraft, saveEvent, setEventStatus, technicalDetail, type EventDraft,
+} from "@/lib/events";
 
 export function NewEventClient({ startAsTemplate = false }: { startAsTemplate?: boolean }) {
   const router = useRouter();
@@ -17,14 +21,12 @@ export function NewEventClient({ startAsTemplate = false }: { startAsTemplate?: 
   const supabase = createBrowserClient();
   const [draft, setDraft] = useState<EventDraft>(() => ({ ...emptyDraft(), is_template: startAsTemplate }));
   const [busy, setBusy] = useState(false);
-  const [savedId, setSavedId] = useState<string | null>(null);
 
   const save = async (d: EventDraft, thenPublish: boolean) => {
-    setBusy(true);
+    setBusy(true); // duplicate submissions disabled by loading={busy} on both buttons
     try {
-      const { id, created } = await saveEvent(supabase, savedId, d);
-      setSavedId(id);
-      if (thenPublish && !d.is_template) {
+      const { id, created } = await saveEvent(supabase, null, d);
+      if (thenPublish) {
         await setEventStatus(supabase, id, "published");
         toast.success("Event published — members notified.");
       } else {
@@ -33,8 +35,10 @@ export function NewEventClient({ startAsTemplate = false }: { startAsTemplate?: 
       router.push(`/admin/events/${id}`);
       router.refresh();
     } catch (err) {
-      const code = err instanceof Error && "code" in err ? String((err as { code: unknown }).code) : null;
-      toast.error(code ? `Could not save the event (${code}).` : "Could not save the event. Please try again.");
+      console.error("[save-event] failed:", err);
+      toast.error(`Unable to save the event. Technical error: ${technicalDetail(err)}`);
+      // Form state is intentionally untouched — the admin can retry without
+      // recreating anything (§32).
     } finally {
       setBusy(false);
     }
@@ -46,7 +50,7 @@ export function NewEventClient({ startAsTemplate = false }: { startAsTemplate?: 
       onChange={setDraft}
       busy={busy}
       saveLabel={draft.is_template ? "Save template" : "Save draft"}
-      onSave={(d) => void save(d, false)}
+      onSave={(d, publish) => void save(d, publish)}
       onCancel={() => router.push("/admin/events")}
     />
   );

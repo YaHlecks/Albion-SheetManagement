@@ -82,3 +82,38 @@ describe("signup double-submit guards", () => {
     expect(sheet).toMatch(/if \(!claimSlot \|\| busy\) return/);
   });
 });
+
+describe("save_event/duplicate_event stay in lockstep with migration 0004", () => {
+  const sql = readFileSync(join(process.cwd(), "supabase", "migrations", "0001_init.sql"), "utf8");
+  const m4 = readFileSync(join(process.cwd(), "supabase", "migrations", "0004_save_event_requirements.sql"), "utf8");
+
+  /** Extract one function body (between the outer $$ delimiters). */
+  const fnBody = (text: string, name: string): string => {
+    const m = text.match(new RegExp(`function public\\.${name}\\b[\\s\\S]*?as \\$\\$\\n([\\s\\S]*?)\\n\\$\\$;`, "m"));
+    if (!m) throw new Error(`${name} not found in migration SQL`);
+    return m[1];
+  };
+
+  it("0004 exists and defines both functions", () => {
+    expect(m4).toMatch(/create or replace function public\.save_event/);
+    expect(m4).toMatch(/create or replace function public\.duplicate_event/);
+  });
+
+  it("save_event body in 0001 ≡ save_event body in 0004 (no drift)", () => {
+    expect(fnBody(sql, "save_event").replace(/\s+/g, " ")).toBe(fnBody(m4, "save_event").replace(/\s+/g, " "));
+  });
+
+  it("duplicate_event body in 0001 ≡ duplicate_event body in 0004 (no drift)", () => {
+    expect(fnBody(sql, "duplicate_event").replace(/\s+/g, " ")).toBe(fnBody(m4, "duplicate_event").replace(/\s+/g, " "));
+  });
+
+  it("save_event performs DRAFT-ONLY validation (title gate only) so incomplete drafts persist", () => {
+    const fn = fnBody(sql, "save_event");
+    expect(fn).toMatch(/INVALID_TITLE/);
+    expect(fn).not.toMatch(/'published'|'locked'/);
+  });
+  it("both functions re-assert EXECUTE grants for authenticated", () => {
+    expect(m4).toMatch(/grant execute on function public\.save_event\(uuid, jsonb\) to authenticated/);
+    expect(m4).toMatch(/grant execute on function public\.duplicate_event\(uuid\) to authenticated/);
+  });
+});

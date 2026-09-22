@@ -151,6 +151,35 @@ async function main() {
     }
   }
 
+  // Stale-RPC detector (the original "Save Draft is broken"): 0003 dropped
+  // event_slots.equipment, so a pre-0004 save_event body still INSERTs into a
+  // column that no longer exists — every admin save fails with 42703 at call
+  // time. The new body references event_slot_requirements; the old one cannot.
+  {
+    const { rows: bodyRows } = await client.query(
+      `select prosrc from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+       where n.nspname = 'public' and p.proname = 'save_event'`,
+    );
+    const body = bodyRows[0]?.prosrc ?? "";
+    if (body && !body.includes("event_slot_requirements")) {
+      report(false, "save_event body is CURRENT (requirements-aware)",
+        "STALE — still targets the dropped equipment column; every save will 42703. Run db:push.");
+    } else if (body) {
+      report(true, "save_event body is CURRENT (requirements-aware)");
+    }
+    const { rows: dupBody } = await client.query(
+      `select prosrc from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+       where n.nspname = 'public' and p.proname = 'duplicate_event'`,
+    );
+    const dup = dupBody[0]?.prosrc ?? "";
+    if (dup && !dup.includes("event_slot_requirements")) {
+      report(false, "duplicate_event body is CURRENT (requirements-aware)",
+        "STALE — run db:push (migration 0004) to redefine it.");
+    } else if (dup) {
+      report(true, "duplicate_event body is CURRENT (requirements-aware)");
+    }
+  }
+
   // Composable requirements contract: the table must exist and be populated
   // correctly for any events that have slots.
   if (present.has("event_slot_requirements")) {
@@ -361,11 +390,14 @@ async function main() {
           `select es.id from public.event_slots es
            join public.event_parties ep on ep.id = es.party_id
            where ep.event_id = $1 limit 1`, [eventId]);
+        // Two sequential claims — the race pair the test plans call for.
+        // Only the first may succeed; the second must be rejected in-database.
         const c1 = await probe("authenticated", `select public.claim_event_slot('${slotRows[0].id}', null) as res;`, claims);
         report(c1.ok && c1.rows?.[0]?.res?.ok === true, "first signup succeeds", c1.ok ? "claimed" : JSON.stringify(c1.rows?.[0]?.res ?? c1.message));
-        report(c1.ok && c1.rows?.[0]?.res?.ok === false && c1.rows?.[0]?.res?.error === "ALREADY_SIGNED_UP",
-          "duplicate signup rejected (one signup per member per event)",
-          c1.ok ? `error=${c1.rows?.[0]?.res?.error}` : "n/a");
+        const c2 = await probe("authenticated", `select public.claim_event_slot('${slotRows[0].id}', null) as res;`, claims);
+        report(c2.ok && c2.rows?.[0]?.res?.ok === false && c2.rows?.[0]?.res?.error === "ALREADY_SIGNED_UP",
+          "second claim of the same slot rejected (one signup per member per event)",
+          c2.ok ? `error=${c2.rows?.[0]?.res?.error}` : "n/a");
         // Cleanup the disposable rows for real (outside the probe transaction).
         await client.query(`delete from public.events where id = $1`, [eventId]);
       }

@@ -12,7 +12,7 @@ import { Badge, Button, ConfirmDialog, Modal } from "@/components/ui";
 import { EquipmentPicker } from "@/components/equipment-picker";
 import {
   FILL_NOTES, REQ_CATEGORIES, ROLES, TIMEZONES, TIER_OPTIONS,
-  type EventDraft, type SlotPriority,
+  validateForPublish, type EventDraft, type SlotPriority,
 } from "@/lib/events";
 
 const STEPS = ["Information", "Parties", "Slots & equipment", "Preview"] as const;
@@ -23,7 +23,7 @@ interface Props {
   draft: EventDraft;
   onChange: (next: EventDraft) => void;
   busy: boolean;
-  onSave: (draft: EventDraft) => void;
+  onSave: (draft: EventDraft, thenPublish: boolean) => void;
   onCancel: () => void;
   saveLabel?: string;
 }
@@ -127,7 +127,9 @@ export function EventBuilder({ draft, onChange, busy, onSave, onCancel, saveLabe
   };
 
   const totalSlots = draft.parties.reduce((n, p) => n + p.slots.length, 0);
-  const canSave = draft.title.trim().length >= 2 && totalSlots > 0;
+  const canSave = draft.title.trim().length >= 2;
+  const publishProblems = useMemo(() => validateForPublish(draft), [draft]);
+  const canPublish = canSave && publishProblems.length === 0;
 
   const whenLabel = useMemo(() => {
     if (!draft.event_date && !draft.massing_time) return "";
@@ -400,17 +402,34 @@ export function EventBuilder({ draft, onChange, busy, onSave, onCancel, saveLabe
         </div>
       )}
 
-      {/* Footer */}
-      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line pt-3">
-        <div className="flex gap-2">
-          <Button type="button" variant="secondary" size="sm" onClick={() => setStep((s) => Math.max(0, s - 1))} disabled={step === 0}>← Back</Button>
-          <Button type="button" variant="secondary" size="sm" onClick={() => setStep((s) => Math.min(STEPS.length - 1, s + 1))} disabled={step === STEPS.length - 1}>Next →</Button>
-        </div>
-        <div className="flex gap-2">
-          <Button type="button" variant="ghost" onClick={onCancel}>Cancel</Button>
-          <Button type="button" onClick={() => onSave(draft)} disabled={!canSave} loading={busy}>
-            {busy ? "Saving…" : saveLabel}
-          </Button>
+      {/* Footer — Save from ANY step (minimal draft validation); Publish only
+          when the strict publish gate passes. Failures keep the form intact. */}
+      <div className="space-y-2 border-t border-line pt-3">
+        {step === 3 && publishProblems.length > 0 && (
+          <div className="panel border-amber-500/40 bg-amber-500/10 p-3 text-sm text-ink">
+            <p className="font-semibold">Before publishing you need:</p>
+            <ul className="mt-1 list-inside list-disc text-xs text-muted">
+              {publishProblems.map((p) => <li key={p}>{p}</li>)}
+            </ul>
+            <p className="mt-1 text-xs text-faint">You can still save this as a draft and finish it later.</p>
+          </div>
+        )}
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex gap-2">
+            <Button type="button" variant="secondary" size="sm" onClick={() => setStep((s) => Math.max(0, s - 1))} disabled={step === 0}>← Back</Button>
+            <Button type="button" variant="secondary" size="sm" onClick={() => setStep((s) => Math.min(STEPS.length - 1, s + 1))} disabled={step === STEPS.length - 1}>Next →</Button>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button type="button" variant="ghost" onClick={onCancel}>Cancel</Button>
+            <Button type="button" onClick={() => onSave(draft, false)} disabled={!canSave} loading={busy}>
+              {busy ? "Saving…" : saveLabel}
+            </Button>
+            {canPublish && (
+              <Button type="button" variant="primary" onClick={() => onSave(draft, true)} loading={busy}>
+                Publish event
+              </Button>
+            )}
+          </div>
         </div>
       </div>
 

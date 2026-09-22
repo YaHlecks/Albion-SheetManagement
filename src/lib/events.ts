@@ -288,6 +288,54 @@ export class EventError extends Error {
   }
 }
 
+/**
+ * DRAFT vs PUBLISH validation (§10) — two different gates.
+ *
+ * Draft saving is gated ONLY by save_event's title check (2 chars), so
+ * incomplete work always persists. Publish is the strict gate below: it runs
+ * in the client BEFORE saving, and the database remains the final authority.
+ */
+export function validateForPublish(draft: EventDraft): string[] {
+  const problems: string[] = [];
+  if (draft.title.trim().length < 2) problems.push("An event name (2+ characters) is required.");
+  if (!draft.event_date) problems.push("An event date is required.");
+  if (!draft.massing_time) problems.push("A massing time is required.");
+  if (draft.parties.length === 0) problems.push("Add at least one party.");
+  const totalSlots = draft.parties.reduce((n, p) => n + p.slots.length, 0);
+  if (totalSlots === 0) problems.push("Add at least one slot.");
+  for (const [pi, p] of draft.parties.entries()) {
+    for (const [si, s] of p.slots.entries()) {
+      if (!s.role.trim()) problems.push(`Party ${pi + 1}, slot ${si + 1}: role is required.`);
+    }
+  }
+  return problems;
+}
+
+/**
+ * Technical detail from any save/RPC failure — shown alongside the friendly
+ * message and logged to the console, so a database failure can never present
+ * as "nothing happened" (§30/§32).
+ */
+export function technicalDetail(err: unknown): string {
+  if (err instanceof EventError) {
+    const explanations: Record<string, string> = {
+      FORBIDDEN: "the database did not recognize this account as an admin (profile.is_platform_admin)",
+      NOT_FOUND: "the event no longer exists (deleted by someone else)",
+      INVALID_TITLE: "event title must be 2–120 characters",
+      INVALID_STATUS: "invalid lifecycle status",
+      UNAUTHENTICATED: "your session expired — sign in again",
+    };
+    return explanations[err.code] ?? `database rejected the operation (${err.code})`;
+  }
+  const e = err as { code?: unknown; message?: unknown; details?: unknown; hint?: unknown } | null;
+  if (e && typeof e.message === "string" && e.message) {
+    const head = [typeof e.code === "string" && e.code ? e.code : null, e.message].filter(Boolean).join(" ");
+    const extra = [e.hint, e.details].filter((x) => typeof x === "string" && x).join(" | ");
+    return extra ? `${head} (${extra})` : head;
+  }
+  return String(err);
+}
+
 /** Friendly copy; raw Postgres codes never reach users. */
 export function friendlyEventError(code: string): string {
   switch (code) {
