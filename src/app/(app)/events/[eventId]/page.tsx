@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { requirePageSession } from "@/lib/api";
 import { createSupabaseServerClient } from "@/lib/supabase-server";
+import { EVENT_SELECT, type EventFull } from "@/lib/events";
 import { MemberEventView } from "@/components/member-event-view";
 
 export const dynamic = "force-dynamic";
@@ -14,11 +15,7 @@ export default async function EventPage({ params }: { params: Promise<{ eventId:
 
   const { data: event } = await supabase
     .from("events")
-    .select(
-      `*, event_parties ( id, event_id, name, fill_note, sort_order,
-        event_slots ( id, party_id, role, equipment, tier_requirement, notes, priority, required, sort_order,
-          event_signups ( id, slot_id, event_id, user_id, ign, note, signed_up_at ) ) )`,
-    )
+    .select(EVENT_SELECT)
     .eq("id", eventId)
     .maybeSingle();
 
@@ -28,7 +25,7 @@ export default async function EventPage({ params }: { params: Promise<{ eventId:
     <div className="mx-auto max-w-6xl space-y-5">
       <div>
         <Link href="/events" className="text-sm text-muted hover:text-ink">← Events</Link>
-        <MemberEventView eventId={eventId} initialEvent={event} userId={ctx.userId} />
+        <MemberEventView eventId={eventId} initialEvent={event as unknown as EventFull} userId={ctx.userId} />
       </div>
     </div>
   );

@@ -1,14 +1,14 @@
 "use client";
 
 /**
- * The spreadsheet-style event sheet (§14): party tables with role /
- * equipment / IGN columns, claim + leave with profile-IGN prefill (§11),
- * status badges with text + symbols (§20 of the old spec — kept), search
- * and filters, and mobile party cards.
+ * The spreadsheet-style event sheet: party tables with role / equipment /
+ * IGN columns, composable requirement display ("Heavy Mace / Guardian Armor /
+ * Shield"), claim + leave with profile-IGN prefill, status badges with text
+ * + symbols, search and filters, and mobile party cards.
  */
 import { useMemo, useState } from "react";
 import { Badge, Button, Modal } from "@/components/ui";
-import { friendlyEventError, EventError, type EventFull, type EventSlot } from "@/lib/events";
+import { friendlyEventError, EventError, requirementLabel, type EventFull, type EventSlot } from "@/lib/events";
 
 export type SlotAction =
   | { kind: "claim"; slot: EventSlot; note?: string }
@@ -46,7 +46,7 @@ export function EventSheet({ event, currentUserId, isAdmin, editable, onAction }
     if (statusFilter === "filled" && s.event_signups.length === 0) return false;
     if (statusFilter === "mine" && !s.event_signups.some((a) => a.user_id === currentUserId)) return false;
     if (search) {
-      const hay = `${s.role} ${s.equipment} ${s.notes ?? ""} ${s.event_signups.map((a) => a.ign).join(" ")}`.toLowerCase();
+      const hay = `${s.role} ${requirementLabel(s)} ${s.notes ?? ""} ${s.event_signups.map((a) => a.ign).join(" ")}`.toLowerCase();
       if (!hay.includes(search.toLowerCase())) return false;
     }
     return true;
@@ -126,15 +126,15 @@ export function EventSheet({ event, currentUserId, isAdmin, editable, onAction }
         })}
       </div>
 
-      {/* Claim modal — IGN comes from the profile server-side (§11) */}
+      {/* Claim modal — IGN comes from the profile server-side */}
       <Modal open={Boolean(claimSlot)} onClose={() => setClaimSlot(null)} title="Claim slot">
         {claimSlot && (
           <form onSubmit={(e) => { e.preventDefault(); void confirmClaim(); }} className="space-y-3">
             <p className="text-sm text-muted">
-              {claimSlot.role} · <span className="font-mono text-[13px]">{claimSlot.equipment}</span>
-              {claimSlot.tier_requirement !== "any" && ` · ${claimSlot.tier_requirement}`}
+              {claimSlot.role} · <span className="font-mono text-[13px]">{requirementLabel(claimSlot)}</span>
               {claimSlot.priority === "high" && " · ★ High priority"}
             </p>
+            {claimSlot.notes && <p className="rounded-md bg-elevated/60 p-2 text-xs text-muted">⚠ {claimSlot.notes}</p>}
             <div>
               <label htmlFor="claim-note" className="field-label">Note (optional)</label>
               <input id="claim-note" className="field" value={claimNote} onChange={(e) => setClaimNote(e.target.value)} maxLength={200} placeholder="e.g. alt character, slightly under-tier" />
@@ -190,8 +190,7 @@ function SlotRow({ slot, zebra, currentUserId, isAdmin, editable, onAction, onCl
         {slot.notes && <div className="text-xs text-faint">{slot.notes}</div>}
       </td>
       <td className="px-3 py-2 align-top font-mono text-xs">
-        {slot.equipment}
-        {slot.tier_requirement !== "any" && <span className="ml-1 text-brand">· {slot.tier_requirement}</span>}
+        {requirementLabel(slot)}
       </td>
       <td className="px-3 py-2 align-top font-semibold">{signup ? signup.ign : <span className="text-faint">—</span>}</td>
       <td className="px-3 py-2 align-top"><StatusBadge slot={slot} /></td>
@@ -211,7 +210,7 @@ function SlotCard({ slot, currentUserId, isAdmin, editable, onAction, onClaim }:
     <div className="px-3 py-3">
       <div className="flex items-center justify-between gap-2">
         <div>
-          <div className="text-sm font-medium text-ink">{slot.role} · <span className="font-mono text-xs">{slot.equipment}</span></div>
+          <div className="text-sm font-medium text-ink">{slot.role} · <span className="font-mono text-xs">{requirementLabel(slot)}</span></div>
           <div className="text-sm font-semibold">{signup ? signup.ign : <span className="text-faint">Available</span>}</div>
         </div>
         <StatusBadge slot={slot} />

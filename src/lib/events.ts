@@ -1,5 +1,11 @@
 /**
- * Event data layer — the app's core domain (§6).
+ * Event data layer — the app's core domain.
+ *
+ * THE MODEL: a slot is a SPREADSHEET ROW. Each row carries 0..n equipment
+ * requirements (event_slot_requirements) across the full taxonomy
+ * (Weapon/Head/Chest/Feet/Off-Hand/Mount/Cape/Bag/Other) — a DPS row can be
+ * weapon-only, a tank row weapon+armor+shield, a battlemount row mount+weapon.
+ * Roles are free-text labels; ROLES below are suggestions only.
  *
  * Reads are flat nested selects (one round-trip, no N+1). All writes go
  * through security-definer RPCs in supabase/migrations/0001_init.sql.
@@ -8,6 +14,34 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 export type EventStatus = "draft" | "published" | "locked" | "completed" | "cancelled" | "archived";
 export type SlotPriority = "high" | "normal" | "low";
+
+/** Slot-requirement categories — matches the DB CHECK and the picker tabs. */
+export const REQ_CATEGORIES = [
+  "Weapon", "Head", "Chest", "Feet", "Off-Hand", "Mount", "Cape", "Bag", "Other",
+] as const;
+export type ReqCategory = (typeof REQ_CATEGORIES)[number];
+
+export const EQUIPMENT_CATEGORIES = [
+  "Weapon", "Head", "Chest", "Feet", "Off-Hand", "Mount", "Cape", "Bag", "Other",
+] as const;
+
+export const ROLES = [
+  "Tank", "DPS", "Healer", "Support", "Caller", "Battlemount",
+  "Frontline", "Backline", "Utility", "Scout", "Fill", "Other",
+] as const;
+
+export const TIMEZONES = [
+  "UTC", "Europe/London", "Europe/Berlin", "Europe/Paris", "Europe/Moscow",
+  "America/New_York", "America/Chicago", "America/Los_Angeles", "America/Sao_Paulo",
+  "Asia/Tokyo", "Asia/Manila", "Asia/Singapore", "Australia/Sydney",
+] as const;
+
+export const FILL_NOTES = [
+  "Fill Party 1 first", "Fill Party 2 first", "Fill Party 1 and 2 first",
+  "Priority tanks", "Reserve party", "FILL 1st and 2nd PT First",
+] as const;
+
+export const TIER_OPTIONS = ["any", "T4", "T4.1", "T5", "T5.1", "T6", "T6.1", "T7", "T7.1", "T8", "T8.1"] as const;
 
 export interface EventSignup {
   id: string;
@@ -19,16 +53,24 @@ export interface EventSignup {
   signed_up_at: string;
 }
 
+export interface SlotRequirement {
+  id?: string;
+  slot_id?: string;
+  category: ReqCategory | string;
+  item: string;
+  tier_requirement: string;
+  sort_order: number;
+}
+
 export interface EventSlot {
   id: string;
   party_id: string;
   role: string;
-  equipment: string;
-  tier_requirement: string;
   notes: string | null;
   priority: SlotPriority;
   required: boolean;
   sort_order: number;
+  event_slot_requirements: SlotRequirement[];
   event_signups: EventSignup[];
 }
 
@@ -66,35 +108,23 @@ export interface EventFull extends EventRow {
 export const EVENT_SELECT = `
   *,
   event_parties ( id, event_id, name, fill_note, sort_order,
-    event_slots ( id, party_id, role, equipment, tier_requirement, notes, priority, required, sort_order,
+    event_slots ( id, party_id, role, notes, priority, required, sort_order,
+      event_slot_requirements ( id, slot_id, category, item, tier_requirement, sort_order ),
       event_signups ( id, slot_id, event_id, user_id, ign, note, signed_up_at ) )
   )` as const;
 
-export const ROLES = [
-  "Tank", "DPS", "Healer", "Support", "Frontline", "Backline",
-  "Utility", "Caller", "Scout", "Fill", "Other",
-] as const;
-
-export const TIMEZONES = [
-  "UTC", "Europe/London", "Europe/Berlin", "Europe/Paris", "Europe/Moscow",
-  "America/New_York", "America/Chicago", "America/Los_Angeles", "America/Sao_Paulo",
-  "Asia/Tokyo", "Asia/Manila", "Asia/Singapore", "Australia/Sydney",
-] as const;
-
-export const FILL_NOTES = [
-  "Fill Party 1 first", "Fill Party 2 first", "Fill Party 1 and 2 first",
-  "Priority tanks", "Reserve party", "FILL 1st and 2nd PT First",
-] as const;
-
-export const TIER_OPTIONS = ["any", "T4", "T4.1", "T5", "T5.1", "T6", "T6.1", "T7", "T7.1", "T8", "T8.1"] as const;
-
 function sortEvent(event: EventFull): EventFull {
   event.event_parties.sort((a, b) => a.sort_order - b.sort_order);
-  for (const p of event.event_parties) p.event_slots.sort((a, b) => a.sort_order - b.sort_order);
+  for (const p of event.event_parties) {
+    p.event_slots.sort((a, b) => a.sort_order - b.sort_order);
+    for (const s of p.event_slots) {
+      s.event_slot_requirements?.sort((a, b) => a.sort_order - b.sort_order);
+    }
+  }
   return event;
 }
 
-/** One round-trip for the whole event — header, parties, slots, signups. */
+/** One round-trip for the whole event — header, parties, slots, requirements, signups. */
 export async function fetchEvent(supabase: SupabaseClient, eventId: string): Promise<EventFull | null> {
   const { data, error } = await supabase
     .from("events")
@@ -102,7 +132,7 @@ export async function fetchEvent(supabase: SupabaseClient, eventId: string): Pro
     .eq("id", eventId)
     .maybeSingle();
   if (error) throw error;
-  return data ? sortEvent(data as EventFull) : null;
+  return data ? sortEvent(data as unknown as EventFull) : null;
 }
 
 /** Events visible to the current user, newest first. */
@@ -141,11 +171,15 @@ export interface EventDraft {
     slots: Array<{
       id?: string;
       role: string;
-      equipment: string;
-      tier_requirement: string;
       notes: string;
       priority: SlotPriority;
       required: boolean;
+      requirements: Array<{
+        id?: string;
+        category: ReqCategory | string;
+        item: string;
+        tier_requirement: string;
+      }>;
       assignedIgn?: string | null;
     }>;
   }>;
@@ -160,7 +194,7 @@ export function emptyDraft(): EventDraft {
   };
 }
 
-/** Save (create or update) via the save_event RPC. */
+/** Save (create or update) via the save_event RPC — one atomic transaction. */
 export async function saveEvent(
   supabase: SupabaseClient,
   eventId: string | null,
@@ -188,12 +222,18 @@ export async function saveEvent(
         slots: p.slots.map((s, si) => ({
           id: s.id,
           role: s.role.trim() || "Fill",
-          equipment: s.equipment.trim() || "TBD",
-          tier_requirement: s.tier_requirement || "any",
           notes: s.notes.trim() || null,
           priority: s.priority,
           required: s.required,
           sort_order: si,
+          requirements: s.requirements
+            .filter((r) => r.item.trim().length > 0)
+            .map((r, ri) => ({
+              category: r.category,
+              item: r.item.trim(),
+              tier_requirement: r.tier_requirement || "any",
+              sort_order: ri,
+            })),
         })),
       })),
     },
@@ -248,7 +288,7 @@ export class EventError extends Error {
   }
 }
 
-/** §42/§47 — friendly copy; raw Postgres codes never reach users. */
+/** Friendly copy; raw Postgres codes never reach users. */
 export function friendlyEventError(code: string): string {
   switch (code) {
     case "SLOT_TAKEN": return "That slot was just taken by someone else. Pick another open slot.";
@@ -266,7 +306,7 @@ export function friendlyEventError(code: string): string {
 
 /**
  * Realtime for one event: signup changes + event status changes.
- * One channel per event, cleaned up by the returned unsubscribe (§36).
+ * One channel per event, cleaned up by the returned unsubscribe.
  */
 export function subscribeToEvent(
   supabase: SupabaseClient,
@@ -309,4 +349,13 @@ export function formatMassingTime(date: string | null, time: string | null, tz: 
   } catch {
     return `${date} ${time} (${tz})`;
   }
+}
+
+/** "Heavy Mace" + "Guardian Armor" → "Heavy Mace / Guardian Armor" for sheet cells. */
+export function requirementLabel(slot: Pick<EventSlot, "event_slot_requirements">): string {
+  const reqs = slot.event_slot_requirements ?? [];
+  if (reqs.length === 0) return "—";
+  return reqs
+    .map((r) => (r.tier_requirement && r.tier_requirement !== "any" ? `${r.item} (${r.tier_requirement})` : r.item))
+    .join(" / ");
 }

@@ -11,8 +11,8 @@ import { describe, expect, it } from "vitest";
 const sql = readFileSync(join(process.cwd(), "supabase", "migrations", "0001_init.sql"), "utf8");
 
 const TABLES = [
-  "profiles", "events", "event_parties", "event_slots", "event_signups",
-  "albion_equipment", "notifications", "audit_logs",
+  "profiles", "events", "event_parties", "event_slots", "event_slot_requirements",
+  "event_signups", "albion_equipment", "notifications", "audit_logs",
 ];
 
 describe("schema — tables & constraints", () => {
@@ -22,16 +22,40 @@ describe("schema — tables & constraints", () => {
     }
   });
 
-  it("chains events → parties → slots → signups with cascading FKs", () => {
+  it("chains events → parties → slots → requirements → signups with cascading FKs", () => {
     expect(sql).toMatch(/event_parties\s*\([\s\S]*?event_id uuid not null references public\.events\(id\) on delete cascade/);
     expect(sql).toMatch(/event_slots\s*\([\s\S]*?party_id uuid not null references public\.event_parties\(id\) on delete cascade/);
+    expect(sql).toMatch(/event_slot_requirements\s*\([\s\S]*?slot_id uuid not null references public\.event_slots\(id\) on delete cascade/);
     expect(sql).toMatch(/event_signups\s*\([\s\S]*?slot_id uuid not null unique references public\.event_slots\(id\)/);
     expect(sql).toMatch(/event_signups\s*\([\s\S]*?event_id uuid not null references public\.events\(id\)/);
+  });
+
+  it("slots are spreadsheet rows with COMPOSABLE requirements (§7/§8)", () => {
+    const reqTable = sql.match(/create table if not exists public\.event_slot_requirements[\s\S]*?\);/)![0];
+    for (const cat of ["Weapon", "Head", "Chest", "Feet", "Off-Hand", "Mount", "Cape", "Bag", "Other"]) {
+      expect(reqTable).toContain(`'${cat}'`);
+    }
+    // A slot no longer has a single equipment column — the old rigid model.
+    const slotTable = sql.match(/create table if not exists public\.event_slots[\s\S]*?\);/)![0];
+    expect(slotTable).not.toMatch(/\bequipment\b/);
   });
 
   it("enforces one-signup-per-slot AND one-signup-per-member-per-event", () => {
     expect(sql).toMatch(/slot_id uuid not null unique/);
     expect(sql).toMatch(/unique \(event_id, user_id\)/);
+  });
+
+  it("save_event writes requirement rows transactionally (0..n per slot)", () => {
+    const fn = sql.match(/function public\.save_event[\s\S]*?\$\$;/)![0];
+    expect(fn).toMatch(/event_slot_requirements/);
+    expect(fn).toMatch(/delete from public\.event_slot_requirements where slot_id = v_slot_id/);
+    expect(fn).toMatch(/coalesce\(jsonb_array_length\(v_slot->'requirements'\), 0\)/);
+  });
+
+  it("duplicate_event copies requirement rows, never signups", () => {
+    const fn = sql.match(/function public\.duplicate_event[\s\S]*?\$\$;/)![0];
+    expect(fn).toMatch(/into public\.event_slot_requirements/);
+    expect(fn).not.toMatch(/event_signups/);
   });
 
   it("uses the smallest sensible event lifecycle (§7)", () => {
@@ -116,7 +140,10 @@ describe("grants — authenticated SELECT-only, anon zero (§33)", () => {
   });
 
   it("grants authenticated SELECT on all tables and nothing else", () => {
-    expect(sql).toMatch(/grant select on public\.profiles, public\.events, public\.event_parties,\s*\n\s*public\.event_slots, public\.event_signups, public\.albion_equipment,\s*\n\s*public\.notifications, public\.audit_logs\s*\n\s*to authenticated/);
+    const grantBlock = sql.match(/grant select on public\.profiles,[\s\S]*?to authenticated;/)![0];
+    for (const t of TABLES) {
+      expect(grantBlock).toContain(t);
+    }
     expect(sql).toMatch(/revoke insert, update, delete, truncate, references, trigger[\s\S]*?from authenticated/);
   });
 
@@ -201,17 +228,33 @@ describe("equipment catalog (§18–25)", () => {
     expect(sql).toMatch(/albion_equipment_family_idx/);
   });
 
-  it("covers all weapon families, armor, helmets, shoes and off-hands", () => {
+  it("covers all weapon families, armor slots, off-hands, mounts, capes and bags", () => {
     for (const family of ["Swords", "Axes", "Maces", "Hammers", "Spears", "Quarterstaffs",
       "Daggers", "Bows", "Crossbows", "Fire Staffs", "Frost Staffs", "Arcane Staffs",
-      "Holy Staffs", "Nature Staffs", "Cursed Staffs", "War Gloves"]) {
+      "Holy Staffs", "Nature Staffs", "Cursed Staffs", "War Gloves", "Shapeshifter Staffs"]) {
       expect(sql).toContain(`'${family}'`);
     }
     for (const item of ["Cryptcandle", "Mistcaller", "Taproot", "Facebreaker", "Leering Cane", "Shield", "Tome of Spells"]) {
       expect(sql).toContain(`'${item}'`);
     }
-    for (const cat of ["'Weapon'", "'Armor'", "'Helmet'", "'Shoes'", "'Off-Hand'"]) {
+    for (const cat of ["'Weapon'", "'Head'", "'Chest'", "'Feet'", "'Off-Hand'", "'Mount'", "'Cape'", "'Bag'"]) {
       expect(sql).toContain(cat);
+    }
+  });
+
+  it("seeds the battle-mount roster from the official wiki", () => {
+    for (const mount of ["Command Mammoth", "Ancient Ent", "Battle Eagle", "Behemoth",
+      "Colossus Beetle", "Goliath Horseeater", "Juggernaut", "Phalanx Beetle",
+      "Roving Bastion", "Siege Ballista", "Tower Chariot", "Flame Basilisk",
+      "Venom Basilisk", "Avalonian Basilisk", "Tower Chariot", "Warhorse", "Swiftclaw",
+      "Direwolf", "Transport Ox", "Giant Stag"]) {
+      expect(sql).toContain(`'${mount}'`);
+    }
+  });
+
+  it("does not re-add the legacy equipment categories", () => {
+    for (const cat of ["'Armor'", "'Helmet'", "'Shoes'"]) {
+      expect(sql).not.toContain(`'${cat}'`);
     }
   });
 
@@ -236,6 +279,11 @@ describe("realtime + reset (§36/§37)", () => {
   it("publishes signups and events for realtime", () => {
     expect(sql).toMatch(/alter publication supabase_realtime add table public\.event_signups/);
     expect(sql).toMatch(/alter publication supabase_realtime add table public\.events/);
+  });
+
+  it("event_slot_requirements follows slot visibility (RLS)", () => {
+    expect(sql).toMatch(/create policy "event_slot_requirements: visible read"[\s\S]*?using \(public\.is_event_slot_visible\(slot_id\)\)/);
+    expect(sql).toMatch(/create policy "event_slot_requirements: admins write"/);
   });
 
   it("reset script drops everything except auth.users and is idempotent", () => {

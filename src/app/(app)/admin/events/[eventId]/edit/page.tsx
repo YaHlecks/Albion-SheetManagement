@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { requireAdminPage } from "@/lib/api";
 import { createSupabaseServerClient } from "@/lib/supabase-server";
+import { EVENT_SELECT } from "@/lib/events";
 import { EditEventClient } from "@/components/edit-event-client";
 
 export const dynamic = "force-dynamic";
@@ -14,11 +15,7 @@ export default async function EditEventPage({ params }: { params: Promise<{ even
 
   const { data: event } = await supabase
     .from("events")
-    .select(
-      `*, event_parties ( id, event_id, name, fill_note, sort_order,
-        event_slots ( id, party_id, role, equipment, tier_requirement, notes, priority, required, sort_order,
-          event_signups ( id, slot_id, event_id, user_id, ign, note, signed_up_at ) ) )`,
-    )
+    .select(EVENT_SELECT)
     .eq("id", eventId)
     .maybeSingle();
 

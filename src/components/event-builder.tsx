@@ -1,19 +1,23 @@
 "use client";
 
 /**
- * Admin Event Builder (§13): basic information → party builder → slot
- * builder (with the Albion equipment browser) → preview → save as draft /
- * template. Edits happen on a local draft; saving is one atomic RPC.
+ * Admin Event Builder: basic information → party builder → slot builder with
+ * COMPOSABLE equipment requirements (each row: any number of requirements,
+ * e.g. Tank = Weapon+Head+Chest+Feet+Off-Hand, Battlemount = Mount+Weapon,
+ * DPS = weapon only) → preview → save as draft/template. Edits happen on a
+ * local draft; saving is one atomic RPC.
  */
 import { useMemo, useState } from "react";
 import { Badge, Button, ConfirmDialog, Modal } from "@/components/ui";
 import { EquipmentPicker } from "@/components/equipment-picker";
 import {
-  FILL_NOTES, ROLES, TIMEZONES, TIER_OPTIONS,
+  FILL_NOTES, REQ_CATEGORIES, ROLES, TIMEZONES, TIER_OPTIONS,
   type EventDraft, type SlotPriority,
 } from "@/lib/events";
 
 const STEPS = ["Information", "Parties", "Slots & equipment", "Preview"] as const;
+
+type SlotDraft = EventDraft["parties"][number]["slots"][number];
 
 interface Props {
   draft: EventDraft;
@@ -28,7 +32,8 @@ export function EventBuilder({ draft, onChange, busy, onSave, onCancel, saveLabe
   const [step, setStep] = useState(0);
   const [deleteParty, setDeleteParty] = useState<number | null>(null);
   const [deleteSlot, setDeleteSlot] = useState<{ party: number; slot: number } | null>(null);
-  const [picker, setPicker] = useState<{ party: number; slot: number } | null>(null);
+  const [picker, setPicker] = useState<{ party: number; slot: number; req: number } | null>(null);
+  const [showCustomRole, setShowCustomRole] = useState<Record<string, boolean>>({});
 
   const set = (patch: Partial<EventDraft>) => onChange({ ...draft, ...patch });
 
@@ -46,7 +51,10 @@ export function EventBuilder({ draft, onChange, busy, onSave, onCancel, saveLabe
     const copy = {
       name: `${src.name} (copy)`,
       fill_note: src.fill_note,
-      slots: src.slots.map((s) => ({ ...s, id: undefined, assignedIgn: null })),
+      slots: src.slots.map((s) => ({
+        ...s, id: undefined, assignedIgn: null,
+        requirements: s.requirements.map((r) => ({ ...r, id: undefined })),
+      })),
     };
     const parties = [...draft.parties];
     parties.splice(i + 1, 0, copy);
@@ -58,15 +66,22 @@ export function EventBuilder({ draft, onChange, busy, onSave, onCancel, saveLabe
     setDeleteParty(null);
   };
 
-  const addSlot = (pi: number) =>
+  const moveParty = (i: number, dir: -1 | 1) => {
+    const parties = [...draft.parties];
+    const j = i + dir;
+    if (j < 0 || j >= parties.length) return;
+    [parties[i], parties[j]] = [parties[j], parties[i]];
+    set({ parties });
+  };
+
+  const addSlot = (pi: number, role = "DPS") =>
     setParty(pi, {
       slots: [...draft.parties[pi].slots, {
-        role: "DPS", equipment: "", tier_requirement: "any",
-        notes: "", priority: "normal", required: true,
+        role, notes: "", priority: "normal", required: true, requirements: [],
       }],
     });
 
-  const setSlot = (pi: number, si: number, patch: Partial<EventDraft["parties"][number]["slots"][number]>) => {
+  const setSlot = (pi: number, si: number, patch: Partial<SlotDraft>) => {
     const party = draft.parties[pi];
     setParty(pi, { slots: party.slots.map((s, idx) => (idx === si ? { ...s, ...patch } : s)) });
   };
@@ -82,6 +97,33 @@ export function EventBuilder({ draft, onChange, busy, onSave, onCancel, saveLabe
     if (j < 0 || j >= slots.length) return;
     [slots[si], slots[j]] = [slots[j], slots[si]];
     setParty(pi, { slots });
+  };
+
+  const addRequirement = (pi: number, si: number, category = "Weapon") => {
+    const slot = draft.parties[pi].slots[si];
+    setSlot(pi, si, {
+      requirements: [...slot.requirements, { category, item: "", tier_requirement: "any" }],
+    });
+  };
+
+  const setRequirement = (pi: number, si: number, ri: number, patch: Partial<SlotDraft["requirements"][number]>) => {
+    const slot = draft.parties[pi].slots[si];
+    setSlot(pi, si, {
+      requirements: slot.requirements.map((r, idx) => (idx === ri ? { ...r, ...patch } : r)),
+    });
+  };
+
+  const removeRequirement = (pi: number, si: number, ri: number) => {
+    const slot = draft.parties[pi].slots[si];
+    setSlot(pi, si, { requirements: slot.requirements.filter((_, idx) => idx !== ri) });
+  };
+
+  const moveRequirement = (pi: number, si: number, ri: number, dir: -1 | 1) => {
+    const reqs = [...draft.parties[pi].slots[si].requirements];
+    const j = ri + dir;
+    if (j < 0 || j >= reqs.length) return;
+    [reqs[ri], reqs[j]] = [reqs[j], reqs[ri]];
+    setSlot(pi, si, { requirements: reqs });
   };
 
   const totalSlots = draft.parties.reduce((n, p) => n + p.slots.length, 0);
@@ -109,7 +151,7 @@ export function EventBuilder({ draft, onChange, busy, onSave, onCancel, saveLabe
         ))}
       </ol>
 
-      {/* STEP 1 — information (§13 basic + mass information) */}
+      {/* STEP 1 — information */}
       {step === 0 && (
         <div className="panel grid gap-3 p-4 sm:grid-cols-2">
           <div className="sm:col-span-2">
@@ -157,7 +199,7 @@ export function EventBuilder({ draft, onChange, busy, onSave, onCancel, saveLabe
         </div>
       )}
 
-      {/* STEP 2 — party builder (§8) */}
+      {/* STEP 2 — party builder */}
       {step === 1 && (
         <div className="space-y-3">
           {draft.parties.map((party, pi) => (
@@ -169,6 +211,8 @@ export function EventBuilder({ draft, onChange, busy, onSave, onCancel, saveLabe
                   {FILL_NOTES.map((n) => <option key={n} value={n}>{n}</option>)}
                 </select>
                 <div className="ml-auto flex gap-1">
+                  <Button type="button" size="sm" variant="ghost" onClick={() => moveParty(pi, -1)} disabled={pi === 0} aria-label="Move party up">↑</Button>
+                  <Button type="button" size="sm" variant="ghost" onClick={() => moveParty(pi, 1)} disabled={pi === draft.parties.length - 1} aria-label="Move party down">↓</Button>
                   <Button type="button" size="sm" variant="ghost" onClick={() => duplicateParty(pi)}>Duplicate</Button>
                   <Button type="button" size="sm" variant="outline-danger" onClick={() => setDeleteParty(pi)}>Delete</Button>
                 </div>
@@ -180,7 +224,7 @@ export function EventBuilder({ draft, onChange, busy, onSave, onCancel, saveLabe
         </div>
       )}
 
-      {/* STEP 3 — slot builder (§9) */}
+      {/* STEP 3 — slot builder with composable requirements */}
       {step === 2 && (
         <div className="space-y-3">
           {draft.parties.map((party, pi) => (
@@ -188,54 +232,128 @@ export function EventBuilder({ draft, onChange, busy, onSave, onCancel, saveLabe
               <h3 className="section-title mb-2">{party.name}{party.fill_note ? ` — ${party.fill_note}` : ""}</h3>
               <div className="space-y-2">
                 {party.slots.map((slot, si) => (
-                  <div key={si} className="flex flex-wrap items-end gap-2 rounded-lg bg-elevated/60 p-2">
-                    <div>
-                      <label htmlFor={`slot-role-${pi}-${si}`} className="field-label">Role</label>
-                      <input id={`slot-role-${pi}-${si}`} list="event-roles" className="field sm:w-32" value={slot.role} onChange={(e) => setSlot(pi, si, { role: e.target.value })} maxLength={40} />
-                    </div>
-                    <div>
-                      <label htmlFor={`slot-eq-${pi}-${si}`} className="field-label">Required equipment</label>
-                      <div className="flex gap-1">
-                        <input id={`slot-eq-${pi}-${si}`} list="event-equipment" className="field sm:w-44" value={slot.equipment} onChange={(e) => setSlot(pi, si, { equipment: e.target.value })} maxLength={120} />
-                        <Button type="button" size="sm" variant="secondary" className="h-10" onClick={() => setPicker({ party: pi, slot: si })}>Browse</Button>
+                  <div key={si} className="rounded-lg bg-elevated/60 p-2">
+                    <div className="flex flex-wrap items-end gap-2">
+                      <div>
+                        <label htmlFor={`slot-role-${pi}-${si}`} className="field-label">Role</label>
+                        {showCustomRole[`${pi}-${si}`] ? (
+                          <input
+                            id={`slot-role-${pi}-${si}`}
+                            className="field sm:w-36"
+                            value={slot.role}
+                            onChange={(e) => setSlot(pi, si, { role: e.target.value })}
+                            maxLength={40}
+                            autoFocus
+                          />
+                        ) : (
+                          <select
+                            id={`slot-role-${pi}-${si}`}
+                            className="field sm:w-36"
+                            value={ROLES.includes(slot.role as (typeof ROLES)[number]) ? slot.role : "__custom"}
+                            onChange={(e) => {
+                              if (e.target.value === "__custom") {
+                                setShowCustomRole((m) => ({ ...m, [`${pi}-${si}`]: true }));
+                                setSlot(pi, si, { role: "" });
+                              } else {
+                                setSlot(pi, si, { role: e.target.value });
+                              }
+                            }}
+                          >
+                            {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
+                            {ROLES.includes(slot.role as (typeof ROLES)[number]) ? null : <option value={slot.role}>{slot.role}</option>}
+                            <option value="__custom">Custom…</option>
+                          </select>
+                        )}
+                      </div>
+                      <div>
+                        <label htmlFor={`slot-prio-${pi}-${si}`} className="field-label">Priority</label>
+                        <select id={`slot-prio-${pi}-${si}`} className="field sm:w-28" value={slot.priority} onChange={(e) => setSlot(pi, si, { priority: e.target.value as SlotPriority })}>
+                          <option value="high">High</option>
+                          <option value="normal">Normal</option>
+                          <option value="low">Low</option>
+                        </select>
+                      </div>
+                      <div className="min-w-52 flex-1">
+                        <label htmlFor={`slot-notes-${pi}-${si}`} className="field-label">Special instructions</label>
+                        <input id={`slot-notes-${pi}-${si}`} className="field" value={slot.notes} onChange={(e) => setSlot(pi, si, { notes: e.target.value })} placeholder="e.g. USE 1H MACE · BRING POISON · FILL P1 FIRST" maxLength={200} />
+                      </div>
+                      <div className="ml-auto flex items-center gap-1 pb-0.5">
+                        {slot.assignedIgn && <Badge status="approved">{slot.assignedIgn}</Badge>}
+                        <Button type="button" size="sm" variant="ghost" onClick={() => moveSlot(pi, si, -1)} aria-label="Move slot up" disabled={si === 0}>↑</Button>
+                        <Button type="button" size="sm" variant="ghost" onClick={() => moveSlot(pi, si, 1)} aria-label="Move slot down" disabled={si === party.slots.length - 1}>↓</Button>
+                        <Button type="button" size="sm" variant="outline-danger" onClick={() => setDeleteSlot({ party: pi, slot: si })}>Delete</Button>
                       </div>
                     </div>
-                    <div>
-                      <label htmlFor={`slot-tier-${pi}-${si}`} className="field-label">Tier</label>
-                      <select id={`slot-tier-${pi}-${si}`} className="field sm:w-24" value={slot.tier_requirement} onChange={(e) => setSlot(pi, si, { tier_requirement: e.target.value })}>
-                        {TIER_OPTIONS.map((t) => <option key={t} value={t}>{t === "any" ? "Any" : t}</option>)}
-                      </select>
-                    </div>
-                    <div>
-                      <label htmlFor={`slot-prio-${pi}-${si}`} className="field-label">Priority</label>
-                      <select id={`slot-prio-${pi}-${si}`} className="field sm:w-28" value={slot.priority} onChange={(e) => setSlot(pi, si, { priority: e.target.value as SlotPriority })}>
-                        <option value="high">High</option>
-                        <option value="normal">Normal</option>
-                        <option value="low">Low</option>
-                      </select>
-                    </div>
-                    <div>
-                      <label htmlFor={`slot-notes-${pi}-${si}`} className="field-label">Notes</label>
-                      <input id={`slot-notes-${pi}-${si}`} className="field sm:w-44" value={slot.notes} onChange={(e) => setSlot(pi, si, { notes: e.target.value })} maxLength={200} />
-                    </div>
-                    <div className="ml-auto flex items-center gap-1 pb-0.5">
-                      {slot.assignedIgn && <Badge status="approved">{slot.assignedIgn}</Badge>}
-                      <Button type="button" size="sm" variant="ghost" onClick={() => moveSlot(pi, si, -1)} aria-label="Move slot up" disabled={si === 0}>↑</Button>
-                      <Button type="button" size="sm" variant="ghost" onClick={() => moveSlot(pi, si, 1)} aria-label="Move slot down" disabled={si === party.slots.length - 1}>↓</Button>
-                      <Button type="button" size="sm" variant="outline-danger" onClick={() => setDeleteSlot({ party: pi, slot: si })}>Delete</Button>
+
+                    {/* Composable requirements — the spreadsheet row's gear */}
+                    <div className="mt-2 space-y-1.5">
+                      <p className="field-label">Required equipment ({slot.requirements.length})</p>
+                      {slot.requirements.map((req, ri) => (
+                        <div key={ri} className="flex flex-wrap items-center gap-1.5 rounded-md bg-surface p-1.5">
+                          <select
+                            className="field h-9 w-28 text-xs"
+                            value={req.category}
+                            onChange={(e) => setRequirement(pi, si, ri, { category: e.target.value })}
+                            aria-label="Requirement category"
+                          >
+                            {REQ_CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
+                          </select>
+                          <input
+                            className="field h-9 min-w-0 flex-1 font-mono text-xs"
+                            value={req.item}
+                            onChange={(e) => setRequirement(pi, si, ri, { item: e.target.value })}
+                            placeholder="Item name — type or Browse"
+                            maxLength={120}
+                            aria-label="Requirement item"
+                          />
+                          <select
+                            className="field h-9 w-24 text-xs"
+                            value={req.tier_requirement}
+                            onChange={(e) => setRequirement(pi, si, ri, { tier_requirement: e.target.value })}
+                            aria-label="Requirement tier"
+                          >
+                            {TIER_OPTIONS.map((t) => <option key={t} value={t}>{t === "any" ? "Any" : t}</option>)}
+                          </select>
+                          <Button type="button" size="sm" variant="secondary" className="h-9" onClick={() => setPicker({ party: pi, slot: si, req: ri })}>Browse</Button>
+                          <Button type="button" size="sm" variant="ghost" onClick={() => moveRequirement(pi, si, ri, -1)} disabled={ri === 0} aria-label="Move requirement up">↑</Button>
+                          <Button type="button" size="sm" variant="ghost" onClick={() => moveRequirement(pi, si, ri, 1)} disabled={ri === slot.requirements.length - 1} aria-label="Move requirement down">↓</Button>
+                          <Button type="button" size="sm" variant="outline-danger" onClick={() => removeRequirement(pi, si, ri)} aria-label="Remove requirement">✕</Button>
+                        </div>
+                      ))}
+                      <div className="flex flex-wrap gap-1.5">
+                        <Button type="button" size="sm" variant="secondary" onClick={() => addRequirement(pi, si, "Weapon")}>+ Weapon</Button>
+                        <Button type="button" size="sm" variant="secondary" onClick={() => addRequirement(pi, si, "Head")}>+ Head</Button>
+                        <Button type="button" size="sm" variant="secondary" onClick={() => addRequirement(pi, si, "Chest")}>+ Chest</Button>
+                        <Button type="button" size="sm" variant="secondary" onClick={() => addRequirement(pi, si, "Feet")}>+ Feet</Button>
+                        <Button type="button" size="sm" variant="secondary" onClick={() => addRequirement(pi, si, "Off-Hand")}>+ Off-Hand</Button>
+                        <Button type="button" size="sm" variant="secondary" onClick={() => addRequirement(pi, si, "Mount")}>+ Mount</Button>
+                        <Button type="button" size="sm" variant="ghost" onClick={() => addRequirement(pi, si, "Cape")}>+ Cape</Button>
+                        <Button type="button" size="sm" variant="ghost" onClick={() => addRequirement(pi, si, "Bag")}>+ Bag</Button>
+                        <Button type="button" size="sm" variant="ghost" onClick={() => addRequirement(pi, si, "Other")}>+ Other</Button>
+                      </div>
                     </div>
                   </div>
                 ))}
               </div>
-              <Button type="button" size="sm" variant="secondary" className="mt-2" onClick={() => addSlot(pi)}>+ Add slot</Button>
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                <Button type="button" size="sm" variant="secondary" onClick={() => addSlot(pi, "DPS")}>+ DPS</Button>
+                <Button type="button" size="sm" variant="secondary" onClick={() => addSlot(pi, "Tank")}>+ Tank</Button>
+                <Button type="button" size="sm" variant="secondary" onClick={() => addSlot(pi, "Healer")}>+ Healer</Button>
+                <Button type="button" size="sm" variant="secondary" onClick={() => addSlot(pi, "Support")}>+ Support</Button>
+                <Button type="button" size="sm" variant="secondary" onClick={() => addSlot(pi, "Caller")}>+ Caller</Button>
+                <Button type="button" size="sm" variant="secondary" onClick={() => addSlot(pi, "Battlemount")}>+ Battlemount</Button>
+                <Button type="button" size="sm" variant="ghost" onClick={() => addSlot(pi, "Fill")}>+ Fill</Button>
+              </div>
             </div>
           ))}
-          <datalist id="event-roles">{ROLES.map((r) => <option key={r} value={r} />)}</datalist>
-          <p className="field-hint">Roles and equipment are suggestions — use the Browse picker for the real catalog, or type group shorthand (e.g. “SOB / ICICLE”, “Any DPS”).</p>
+          <p className="field-hint">
+            Roles are spreadsheet labels — pick a preset or Custom. A row can need any
+            combination of gear: weapon-only DPS, full tank sets, Mount + Weapon battlemounts.
+          </p>
         </div>
       )}
 
-      {/* STEP 4 — preview (§8/§14) */}
+      {/* STEP 4 — preview (the real sheet layout) */}
       {step === 3 && (
         <div className="space-y-3">
           <div className="panel p-0">
@@ -263,8 +381,12 @@ export function EventBuilder({ draft, onChange, busy, onSave, onCancel, saveLabe
                     <tbody>
                       {party.slots.map((slot, si) => (
                         <tr key={si} className={si % 2 === 1 ? "bg-elevated/40" : undefined}>
-                          <td className="py-0.5 pr-2 font-medium">{slot.role}</td>
-                          <td className="py-0.5 pr-2 font-mono">{slot.equipment}{slot.tier_requirement !== "any" ? ` (${slot.tier_requirement})` : ""}</td>
+                          <td className="py-0.5 pr-2 font-medium">{slot.role || "Fill"}</td>
+                          <td className="py-0.5 pr-2 font-mono">
+                            {slot.requirements.filter((r) => r.item.trim()).length === 0
+                              ? "—"
+                              : slot.requirements.filter((r) => r.item.trim()).map((r) => r.item + (r.tier_requirement !== "any" ? ` (${r.tier_requirement})` : "")).join(" / ")}
+                          </td>
                           <td className="py-0.5 text-faint">{slot.assignedIgn ?? "AVAILABLE"}</td>
                         </tr>
                       ))}
@@ -311,7 +433,7 @@ export function EventBuilder({ draft, onChange, busy, onSave, onCancel, saveLabe
           if (!s) return "";
           return s.assignedIgn
             ? `This slot is signed by ${s.assignedIgn}. Deleting it removes their signup.`
-            : `Delete this slot (${s.equipment || s.role || "unnamed"})?`;
+            : `Delete this slot (${s.role || "unnamed"})?`;
         })()}
         confirmLabel="Delete slot"
         danger
@@ -323,7 +445,7 @@ export function EventBuilder({ draft, onChange, busy, onSave, onCancel, saveLabe
       <Modal open={picker !== null} onClose={() => setPicker(null)} title="Albion equipment" wide>
         {picker && (
           <EquipmentPicker
-            onPick={(name, tier) => setSlot(picker.party, picker.slot, { equipment: name, tier_requirement: tier })}
+            onPick={(category, name, tier) => setRequirement(picker.party, picker.slot, picker.req, { category, item: name, tier_requirement: tier })}
             onClose={() => setPicker(null)}
           />
         )}

@@ -19,6 +19,7 @@ import {
   formatMassingTime,
   friendlyEventError,
   EventError,
+  requirementLabel,
   setEventStatus,
   subscribeToEvent,
   type EventFull,
@@ -214,7 +215,7 @@ export function AdminEventDetail({ eventId, initialEvent }: {
         {assignSlot && (
           <div className="space-y-3">
             <p className="text-sm text-muted">
-              {assignSlot.role} · <span className="font-mono text-[13px]">{assignSlot.equipment}</span>
+              {assignSlot.role} · <span className="font-mono text-[13px]">{requirementLabel(assignSlot)}</span>
               {assignSlot.event_signups[0] && <> · currently: <strong>{assignSlot.event_signups[0].ign}</strong></>}
             </p>
             <div>

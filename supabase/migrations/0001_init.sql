@@ -5,6 +5,7 @@
 -- legacy/ for the old system). Core model:
 --
 --   profiles → events → event_parties → event_slots → event_signups
+--   event_slots → event_slot_requirements (composable equipment per row)
 --   albion_equipment (catalog) · notifications · audit_logs
 --
 -- Security model (unchanged in spirit from the legacy repairs):
@@ -81,9 +82,6 @@ create table if not exists public.event_slots (
   id uuid primary key default gen_random_uuid(),
   party_id uuid not null references public.event_parties(id) on delete cascade,
   role text not null check (char_length(role) between 1 and 40),
-  equipment text not null check (char_length(equipment) between 1 and 120),
-  tier_requirement text not null default 'any'
-    check (tier_requirement in ('any','T4','T4.1','T5','T5.1','T6','T6.1','T7','T7.1','T8','T8.1')),
   notes text check (notes is null or char_length(notes) <= 200),
   priority text not null default 'normal' check (priority in ('high','normal','low')),
   required boolean not null default true,
@@ -91,6 +89,67 @@ create table if not exists public.event_slots (
 );
 
 create index if not exists event_slots_party_idx on public.event_slots (party_id, sort_order);
+
+-- ----------------------------------------------------------------------------
+-- 4b. SLOT EQUIPMENT REQUIREMENTS — the composable heart of the sheet.
+--
+-- A slot is a SPREADSHEET ROW, not a character build: it carries ANY number
+-- of requirements (0..n) across the full equipment taxonomy:
+--
+--   TANK        → Weapon + Head + Chest + Feet + Off-Hand
+--   DPS         → Weapon only
+--   BATTLEMOUNT → Mount + Weapon (+ anything else the admin adds)
+--   CALLER      → Weapon (+ instructions in slot.notes)
+--
+-- Roles are free-text labels (Tank/DPS/Healer/Support/Caller/Battlemount or
+-- anything the organizer types); the catalog is a PICKER AID and `item`
+-- stays free text so group shorthand ("SOB / ICICLE") never blocks saving.
+-- ----------------------------------------------------------------------------
+create table if not exists public.event_slot_requirements (
+  id uuid primary key default gen_random_uuid(),
+  slot_id uuid not null references public.event_slots(id) on delete cascade,
+  category text not null
+    check (category in ('Weapon','Head','Chest','Feet','Off-Hand','Mount','Cape','Bag','Other')),
+  item text not null check (char_length(item) between 1 and 120),
+  tier_requirement text not null default 'any'
+    check (tier_requirement in ('any','T4','T4.1','T5','T5.1','T6','T6.1','T7','T7.1','T8','T8.1')),
+  sort_order integer not null default 0
+);
+
+create index if not exists event_slot_requirements_slot_idx
+  on public.event_slot_requirements (slot_id, sort_order);
+
+-- In-place upgrade for databases that ran the pre-rebuild schema (one
+-- free-text `equipment` column per slot): migrate every value into a Weapon-
+-- category requirement, then drop the legacy columns. No-ops on fresh DBs.
+do $$
+declare
+  has_legacy boolean;
+begin
+  select count(*) > 0 into has_legacy
+  from information_schema.columns
+  where table_schema = 'public' and table_name = 'event_slots' and column_name = 'equipment';
+
+  if has_legacy then
+    insert into public.event_slot_requirements (slot_id, category, item, tier_requirement, sort_order)
+    select id, 'Weapon', trim(equipment), coalesce(tier_requirement, 'any'), 0
+    from public.event_slots
+    where equipment is not null
+      and trim(equipment) <> ''
+      and lower(trim(equipment)) <> 'tbd';
+
+    execute 'alter table public.event_slots drop column equipment';
+  end if;
+
+  select count(*) > 0 into has_legacy
+  from information_schema.columns
+  where table_schema = 'public' and table_name = 'event_slots' and column_name = 'tier_requirement';
+
+  if has_legacy then
+    execute 'alter table public.event_slots drop column tier_requirement';
+  end if;
+end
+$$;
 
 -- ----------------------------------------------------------------------------
 -- 5. EVENT SIGNUPS — member self-registration
@@ -119,8 +178,8 @@ create table if not exists public.albion_equipment (
   id uuid primary key default gen_random_uuid(),
   external_id text,
   name text not null unique check (char_length(name) between 2 and 80),
-  category text not null check (category in
-    ('Weapon','Armor','Helmet','Shoes','Off-Hand','Cape','Bag','Consumable','Other')),
+  category text not null constraint albion_equipment_category_check check (category in
+    ('Weapon','Head','Chest','Feet','Off-Hand','Mount','Cape','Bag','Other')),
   family text not null check (char_length(family) between 2 and 40),
   equipment_type text check (equipment_type is null or char_length(equipment_type) <= 40),
   tier text not null default 'any' check (char_length(tier) <= 8),
@@ -136,6 +195,32 @@ create table if not exists public.albion_equipment (
 
 create index if not exists albion_equipment_name_idx on public.albion_equipment (lower(name));
 create index if not exists albion_equipment_family_idx on public.albion_equipment (category, family);
+
+-- In-place upgrade for pre-rebuild databases: the old taxonomy lumped armor
+-- into one 'Armor' category with separate Helmet/Shoes tables-of-thought.
+-- Re-map to the slot-requirement taxonomy (Head/Chest/Feet), then swap the
+-- check constraint for the new value set. No-op on fresh databases.
+do $$
+declare
+  v_con text;
+begin
+  if exists (select 1 from information_schema.tables
+             where table_schema = 'public' and table_name = 'albion_equipment') then
+    update public.albion_equipment set category = 'Chest' where category = 'Armor';
+    update public.albion_equipment set category = 'Head' where category = 'Helmet';
+    update public.albion_equipment set category = 'Feet' where category = 'Shoes';
+
+    select conname into v_con from pg_constraint
+    where conrelid = 'public.albion_equipment'::regclass and contype = 'c'
+      and pg_get_constraintdef(oid) like '%category%' limit 1;
+    if v_con is not null then
+      execute format('alter table public.albion_equipment drop constraint %I', v_con);
+    end if;
+    alter table public.albion_equipment add constraint albion_equipment_category_check
+      check (category in ('Weapon','Head','Chest','Feet','Off-Hand','Mount','Cape','Bag','Other'));
+  end if;
+end
+$$;
 
 -- ----------------------------------------------------------------------------
 -- 7. NOTIFICATIONS
@@ -377,6 +462,9 @@ declare
   v_is_new boolean := false;
   v_party jsonb;
   v_slot jsonb;
+  v_req jsonb;
+  v_req_idx integer;
+  v_item text;
   v_party_id uuid;
   v_slot_id uuid;
   v_kept_slot_ids uuid[] := '{}';
@@ -455,11 +543,9 @@ begin
     loop
       v_slot_id := nullif(v_slot->>'id', '')::uuid;
       if v_slot_id is null then
-        insert into public.event_slots (party_id, role, equipment, tier_requirement, notes, priority, required, sort_order)
+        insert into public.event_slots (party_id, role, notes, priority, required, sort_order)
         values (v_party_id,
                 coalesce(nullif(trim(v_slot->>'role'), ''), 'Fill'),
-                coalesce(nullif(trim(v_slot->>'equipment'), ''), 'TBD'),
-                coalesce(v_slot->>'tier_requirement', 'any'),
                 nullif(trim(coalesce(v_slot->>'notes', '')), ''),
                 coalesce(v_slot->>'priority', 'normal'),
                 coalesce((v_slot->>'required')::boolean, true),
@@ -468,8 +554,6 @@ begin
       else
         update public.event_slots set
           role = coalesce(nullif(trim(v_slot->>'role'), ''), role),
-          equipment = coalesce(nullif(trim(v_slot->>'equipment'), ''), equipment),
-          tier_requirement = coalesce(v_slot->>'tier_requirement', tier_requirement),
           notes = nullif(trim(coalesce(v_slot->>'notes', '')), ''),
           priority = coalesce(v_slot->>'priority', priority),
           required = coalesce((v_slot->>'required')::boolean, required),
@@ -477,11 +561,9 @@ begin
         where id = v_slot_id
           and party_id in (select id from public.event_parties where event_id = v_event_id);
         if not found then
-          insert into public.event_slots (party_id, role, equipment, tier_requirement, notes, priority, required, sort_order)
+          insert into public.event_slots (party_id, role, notes, priority, required, sort_order)
           values (v_party_id,
                   coalesce(nullif(trim(v_slot->>'role'), ''), 'Fill'),
-                  coalesce(nullif(trim(v_slot->>'equipment'), ''), 'TBD'),
-                  coalesce(v_slot->>'tier_requirement', 'any'),
                   nullif(trim(coalesce(v_slot->>'notes', '')), ''),
                   coalesce(v_slot->>'priority', 'normal'),
                   coalesce((v_slot->>'required')::boolean, true),
@@ -489,6 +571,24 @@ begin
           returning id into v_slot_id;
         end if;
       end if;
+
+      -- Equipment requirements: replace the slot's set wholesale so removals
+      -- and reorders in the builder always match the sheet exactly.
+      delete from public.event_slot_requirements where slot_id = v_slot_id;
+      for v_req_idx in 0 .. coalesce(jsonb_array_length(v_slot->'requirements'), 0) - 1
+      loop
+        v_req := v_slot->'requirements'->v_req_idx;
+        v_item := nullif(trim(coalesce(v_req->>'item', '')), '');
+        if v_item is not null then
+          insert into public.event_slot_requirements (slot_id, category, item, tier_requirement, sort_order)
+          values (v_slot_id,
+                  coalesce(v_req->>'category', 'Weapon'),
+                  left(v_item, 120),
+                  coalesce(v_req->>'tier_requirement', 'any'),
+                  v_req_idx);
+        end if;
+      end loop;
+
       v_kept_slot_ids := array_append(v_kept_slot_ids, v_slot_id);
     end loop;
   end loop;
@@ -587,6 +687,7 @@ declare
   v_party record;
   v_slot record;
   v_new_party uuid;
+  v_new_slot uuid;
   v_actor uuid := auth.uid();
 begin
   if not public.is_event_admin() then
@@ -614,9 +715,13 @@ begin
     returning id into v_new_party;
     for v_slot in select * from public.event_slots where party_id = v_party.id order by sort_order
     loop
-      insert into public.event_slots (party_id, role, equipment, tier_requirement, notes, priority, required, sort_order)
-      values (v_new_party, v_slot.role, v_slot.equipment, v_slot.tier_requirement,
-              v_slot.notes, v_slot.priority, v_slot.required, v_slot.sort_order);
+      insert into public.event_slots (party_id, role, notes, priority, required, sort_order)
+      values (v_new_party, v_slot.role, v_slot.notes, v_slot.priority, v_slot.required, v_slot.sort_order)
+      returning id into v_new_slot;
+      insert into public.event_slot_requirements (slot_id, category, item, tier_requirement, sort_order)
+      select v_new_slot, category, item, tier_requirement, sort_order
+      from public.event_slot_requirements where slot_id = v_slot.id
+      order by sort_order;
     end loop;
   end loop;
 
@@ -696,26 +801,27 @@ revoke all on public.profiles        from anon;
 revoke all on public.events          from anon;
 revoke all on public.event_parties   from anon;
 revoke all on public.event_slots     from anon;
+revoke all on public.event_slot_requirements from anon;
 revoke all on public.event_signups   from anon;
 revoke all on public.albion_equipment from anon;
 revoke all on public.notifications   from anon;
 revoke all on public.audit_logs      from anon;
 
 grant select on public.profiles, public.events, public.event_parties,
-  public.event_slots, public.event_signups, public.albion_equipment,
-  public.notifications, public.audit_logs
+  public.event_slots, public.event_slot_requirements, public.event_signups,
+  public.albion_equipment, public.notifications, public.audit_logs
   to authenticated;
 
 revoke insert, update, delete, truncate, references, trigger
   on public.profiles, public.events, public.event_parties, public.event_slots,
-     public.event_signups, public.albion_equipment, public.notifications,
-     public.audit_logs
+     public.event_slot_requirements, public.event_signups, public.albion_equipment,
+     public.notifications, public.audit_logs
   from authenticated;
 
 grant select, insert, update, delete, truncate
   on public.profiles, public.events, public.event_parties, public.event_slots,
-     public.event_signups, public.albion_equipment, public.notifications,
-     public.audit_logs
+     public.event_slot_requirements, public.event_signups, public.albion_equipment,
+     public.notifications, public.audit_logs
   to service_role;
 
 grant execute on function public.is_event_admin() to anon, authenticated;
@@ -737,6 +843,7 @@ alter table public.profiles        enable row level security;
 alter table public.events          enable row level security;
 alter table public.event_parties   enable row level security;
 alter table public.event_slots     enable row level security;
+alter table public.event_slot_requirements enable row level security;
 alter table public.event_signups   enable row level security;
 alter table public.albion_equipment enable row level security;
 alter table public.notifications   enable row level security;
@@ -799,6 +906,21 @@ create policy "event_slots: visible read"
 drop policy if exists "event_slots: admins write" on public.event_slots;
 create policy "event_slots: admins write"
   on public.event_slots for all
+  to authenticated, service_role
+  using (public.is_event_admin())
+  with check (public.is_event_admin());
+
+-- ---------- event_signups ----------
+-- ---------- event_slot_requirements (visibility follows the slot) ----------
+drop policy if exists "event_slot_requirements: visible read" on public.event_slot_requirements;
+create policy "event_slot_requirements: visible read"
+  on public.event_slot_requirements for select
+  to authenticated, service_role
+  using (public.is_event_slot_visible(slot_id));
+
+drop policy if exists "event_slot_requirements: admins write" on public.event_slot_requirements;
+create policy "event_slot_requirements: admins write"
+  on public.event_slot_requirements for all
   to authenticated, service_role
   using (public.is_event_admin())
   with check (public.is_event_admin());
@@ -1363,119 +1485,119 @@ VALUES
 -- ARMOR — CLOTH CHEST
 -- ============================================================
 
-('Scholar Robe','Armor','Cloth','any','seed'),
-('Cleric Robe','Armor','Cloth','any','seed'),
-('Royal Robe','Armor','Cloth','any','seed'),
-('Druid Robe','Armor','Cloth','any','seed'),
-('Fiend Robe','Armor','Cloth','any','seed'),
-('Feyscale Robe','Armor','Cloth','any','seed'),
-('Purity Robe','Armor','Cloth','any','seed'),
-('Cultist Robe','Armor','Cloth','any','seed'),
+('Scholar Robe','Chest','Cloth','any','seed'),
+('Cleric Robe','Chest','Cloth','any','seed'),
+('Royal Robe','Chest','Cloth','any','seed'),
+('Druid Robe','Chest','Cloth','any','seed'),
+('Fiend Robe','Chest','Cloth','any','seed'),
+('Feyscale Robe','Chest','Cloth','any','seed'),
+('Purity Robe','Chest','Cloth','any','seed'),
+('Cultist Robe','Chest','Cloth','any','seed'),
 
 
 -- ============================================================
 -- ARMOR — LEATHER CHEST
 -- ============================================================
 
-('Mercenary Jacket','Armor','Leather','any','seed'),
-('Hunter Jacket','Armor','Leather','any','seed'),
-('Assassin Jacket','Armor','Leather','any','seed'),
-('Stalker Jacket','Armor','Leather','any','seed'),
-('Hellion Jacket','Armor','Leather','any','seed'),
-('Specter Jacket','Armor','Leather','any','seed'),
-('Royal Jacket','Armor','Leather','any','seed'),
-('Mistwalker Jacket','Armor','Leather','any','seed'),
+('Mercenary Jacket','Chest','Leather','any','seed'),
+('Hunter Jacket','Chest','Leather','any','seed'),
+('Assassin Jacket','Chest','Leather','any','seed'),
+('Stalker Jacket','Chest','Leather','any','seed'),
+('Hellion Jacket','Chest','Leather','any','seed'),
+('Specter Jacket','Chest','Leather','any','seed'),
+('Royal Jacket','Chest','Leather','any','seed'),
+('Mistwalker Jacket','Chest','Leather','any','seed'),
 
 
 -- ============================================================
 -- ARMOR — PLATE CHEST
 -- ============================================================
 
-('Soldier Armor','Armor','Plate','any','seed'),
-('Knight Armor','Armor','Plate','any','seed'),
-('Guardian Armor','Armor','Plate','any','seed'),
-('Graveguard Armor','Armor','Plate','any','seed'),
-('Judicator Armor','Armor','Plate','any','seed'),
-('Demon Armor','Armor','Plate','any','seed'),
-('Royal Armor','Armor','Plate','any','seed'),
-('Duskweaver Armor','Armor','Plate','any','seed'),
+('Soldier Armor','Chest','Plate','any','seed'),
+('Knight Armor','Chest','Plate','any','seed'),
+('Guardian Armor','Chest','Plate','any','seed'),
+('Graveguard Armor','Chest','Plate','any','seed'),
+('Judicator Armor','Chest','Plate','any','seed'),
+('Demon Armor','Chest','Plate','any','seed'),
+('Royal Armor','Chest','Plate','any','seed'),
+('Duskweaver Armor','Chest','Plate','any','seed'),
 
 
 -- ============================================================
 -- HELMETS — CLOTH
 -- ============================================================
 
-('Mage Cowl','Helmet','Cloth','any','seed'),
-('Cleric Cowl','Helmet','Cloth','any','seed'),
-('Scholar Cowl','Helmet','Cloth','any','seed'),
-('Fiend Cowl','Helmet','Cloth','any','seed'),
-('Royal Cowl','Helmet','Cloth','any','seed'),
-('Druid Cowl','Helmet','Cloth','any','seed'),
-('Cultist Cowl','Helmet','Cloth','any','seed'),
+('Mage Cowl','Head','Cloth','any','seed'),
+('Cleric Cowl','Head','Cloth','any','seed'),
+('Scholar Cowl','Head','Cloth','any','seed'),
+('Fiend Cowl','Head','Cloth','any','seed'),
+('Royal Cowl','Head','Cloth','any','seed'),
+('Druid Cowl','Head','Cloth','any','seed'),
+('Cultist Cowl','Head','Cloth','any','seed'),
 
 
 -- ============================================================
 -- HELMETS — LEATHER
 -- ============================================================
 
-('Hunter Hood','Helmet','Leather','any','seed'),
-('Mercenary Hood','Helmet','Leather','any','seed'),
-('Assassin Hood','Helmet','Leather','any','seed'),
-('Stalker Hood','Helmet','Leather','any','seed'),
-('Hellion Hood','Helmet','Leather','any','seed'),
-('Specter Hood','Helmet','Leather','any','seed'),
-('Royal Hood','Helmet','Leather','any','seed'),
+('Hunter Hood','Head','Leather','any','seed'),
+('Mercenary Hood','Head','Leather','any','seed'),
+('Assassin Hood','Head','Leather','any','seed'),
+('Stalker Hood','Head','Leather','any','seed'),
+('Hellion Hood','Head','Leather','any','seed'),
+('Specter Hood','Head','Leather','any','seed'),
+('Royal Hood','Head','Leather','any','seed'),
 
 
 -- ============================================================
 -- HELMETS — PLATE
 -- ============================================================
 
-('Soldier Helmet','Helmet','Plate','any','seed'),
-('Knight Helmet','Helmet','Plate','any','seed'),
-('Guardian Helmet','Helmet','Plate','any','seed'),
-('Graveguard Helmet','Helmet','Plate','any','seed'),
-('Judicator Helmet','Helmet','Plate','any','seed'),
-('Demon Helmet','Helmet','Plate','any','seed'),
-('Royal Helmet','Helmet','Plate','any','seed'),
+('Soldier Helmet','Head','Plate','any','seed'),
+('Knight Helmet','Head','Plate','any','seed'),
+('Guardian Helmet','Head','Plate','any','seed'),
+('Graveguard Helmet','Head','Plate','any','seed'),
+('Judicator Helmet','Head','Plate','any','seed'),
+('Demon Helmet','Head','Plate','any','seed'),
+('Royal Helmet','Head','Plate','any','seed'),
 
 
 -- ============================================================
 -- SHOES — CLOTH
 -- ============================================================
 
-('Mage Sandals','Shoes','Cloth','any','seed'),
-('Cleric Sandals','Shoes','Cloth','any','seed'),
-('Scholar Sandals','Shoes','Cloth','any','seed'),
-('Fiend Sandals','Shoes','Cloth','any','seed'),
-('Royal Sandals','Shoes','Cloth','any','seed'),
-('Druid Sandals','Shoes','Cloth','any','seed'),
+('Mage Sandals','Feet','Cloth','any','seed'),
+('Cleric Sandals','Feet','Cloth','any','seed'),
+('Scholar Sandals','Feet','Cloth','any','seed'),
+('Fiend Sandals','Feet','Cloth','any','seed'),
+('Royal Sandals','Feet','Cloth','any','seed'),
+('Druid Sandals','Feet','Cloth','any','seed'),
 
 
 -- ============================================================
 -- SHOES — LEATHER
 -- ============================================================
 
-('Hunter Shoes','Shoes','Leather','any','seed'),
-('Mercenary Shoes','Shoes','Leather','any','seed'),
-('Assassin Shoes','Shoes','Leather','any','seed'),
-('Stalker Shoes','Shoes','Leather','any','seed'),
-('Hellion Shoes','Shoes','Leather','any','seed'),
-('Specter Shoes','Shoes','Leather','any','seed'),
-('Royal Shoes','Shoes','Leather','any','seed'),
+('Hunter Shoes','Feet','Leather','any','seed'),
+('Mercenary Shoes','Feet','Leather','any','seed'),
+('Assassin Shoes','Feet','Leather','any','seed'),
+('Stalker Shoes','Feet','Leather','any','seed'),
+('Hellion Shoes','Feet','Leather','any','seed'),
+('Specter Shoes','Feet','Leather','any','seed'),
+('Royal Shoes','Feet','Leather','any','seed'),
 
 
 -- ============================================================
 -- SHOES — PLATE
 -- ============================================================
 
-('Soldier Boots','Shoes','Plate','any','seed'),
-('Knight Boots','Shoes','Plate','any','seed'),
-('Guardian Boots','Shoes','Plate','any','seed'),
-('Graveguard Boots','Shoes','Plate','any','seed'),
-('Judicator Boots','Shoes','Plate','any','seed'),
-('Demon Boots','Shoes','Plate','any','seed'),
-('Royal Boots','Shoes','Plate','any','seed'),
+('Soldier Boots','Feet','Plate','any','seed'),
+('Knight Boots','Feet','Plate','any','seed'),
+('Guardian Boots','Feet','Plate','any','seed'),
+('Graveguard Boots','Feet','Plate','any','seed'),
+('Judicator Boots','Feet','Plate','any','seed'),
+('Demon Boots','Feet','Plate','any','seed'),
+('Royal Boots','Feet','Plate','any','seed'),
 
 
 -- ============================================================
@@ -1516,7 +1638,98 @@ VALUES
 -- OFF-HANDS — NATURE / ARCANE SPECIALIZED
 -- ============================================================
 
-('Taproot','Off-Hand','Specialized Off-Hands','any','seed')
+('Taproot','Off-Hand','Specialized Off-Hands','any','seed'),
+
+-- ============================================================
+-- MOUNTS — RIDING (per official wiki: family entries keep tier
+-- prefixes out; members pick their own tier)
+-- ============================================================
+
+('Riding Horse','Mount','Horses','any','seed'),
+('Armored Horse','Mount','Horses','any','seed'),
+('Warhorse','Mount','Horses','any','seed'),
+('Gallant Horse','Mount','Horses','any','seed'),
+('Mule','Mount','Transport','any','seed'),
+('Transport Ox','Mount','Transport','any','seed'),
+('Transport Mammoth','Mount','Transport','any','seed'),
+('Giant Stag','Mount','Gathering & Utility','any','seed'),
+('Moose','Mount','Gathering & Utility','any','seed'),
+('Winter Bear','Mount','Gathering & Utility','any','seed'),
+('Grizzly Bear','Mount','Gathering & Utility','any','seed'),
+('Wild Boar','Mount','Gathering & Utility','any','seed'),
+('Terrorbird','Mount','Gathering & Utility','any','seed'),
+('Bighorn Ram','Mount','Gathering & Utility','any','seed'),
+('Swiftclaw','Mount','Dire','any','seed'),
+('Direwolf','Mount','Dire','any','seed'),
+('Greywolf','Mount','Dire','any','seed'),
+('Snow Husky','Mount','Dire','any','seed'),
+('Direboar','Mount','Dire','any','seed'),
+('Direbear','Mount','Dire','any','seed'),
+('Swamp Dragon','Mount','Dire','any','seed'),
+('Pest Lizard','Mount','Dire','any','seed'),
+('Spectral Bat','Mount','Spectral','any','seed'),
+('Spectral Bonehorse','Mount','Spectral','any','seed'),
+('Spectral Direboar','Mount','Spectral','any','seed'),
+('Morgana Raven','Mount','Seasonal & Special','any','seed'),
+('Morgana Nightmare','Mount','Seasonal & Special','any','seed'),
+('Frost Ram','Mount','Seasonal & Special','any','seed'),
+('Black Panther','Mount','Seasonal & Special','any','seed'),
+('Rageclaw','Mount','Seasonal & Special','any','seed'),
+('Divine Owl','Mount','Seasonal & Special','any','seed'),
+('Mystic Owl','Mount','Seasonal & Special','any','seed'),
+('Moabird','Mount','Seasonal & Special','any','seed'),
+('Swamp Salamander','Mount','Seasonal & Special','any','seed'),
+('Caerleon Cottontail','Mount','Seasonal & Special','any','seed'),
+('Heretic Combat Mule','Mount','Faction & Battle','any','seed'),
+('Battle Rhino','Mount','Faction & Battle','any','seed'),
+
+-- ============================================================
+-- MOUNTS — BATTLE MOUNTS (the ZvZ roster; each has Silver/Gold/
+-- Crystal variants — members bring their own tier/quality)
+-- ============================================================
+
+('Command Mammoth','Mount','Battle Mounts','any','seed'),
+('Ancient Ent','Mount','Battle Mounts','any','seed'),
+('Battle Eagle','Mount','Battle Mounts','any','seed'),
+('Behemoth','Mount','Battle Mounts','any','seed'),
+('Colossus Beetle','Mount','Battle Mounts','any','seed'),
+('Goliath Horseeater','Mount','Battle Mounts','any','seed'),
+('Juggernaut','Mount','Battle Mounts','any','seed'),
+('Phalanx Beetle','Mount','Battle Mounts','any','seed'),
+('Roving Bastion','Mount','Battle Mounts','any','seed'),
+('Siege Ballista','Mount','Battle Mounts','any','seed'),
+('Tower Chariot','Mount','Battle Mounts','any','seed'),
+('Flame Basilisk','Mount','Battle Mounts','any','seed'),
+('Venom Basilisk','Mount','Battle Mounts','any','seed'),
+('Avalonian Basilisk','Mount','Battle Mounts','any','seed'),
+
+-- ============================================================
+-- CAPES (families — any tier)
+-- ============================================================
+
+('Cape','Cape','Standard Capes','any','seed'),
+('Avalonian Cape','Cape','Artifact Capes','any','seed'),
+('Undead Cape','Cape','Artifact Capes','any','seed'),
+('Demon Cape','Cape','Artifact Capes','any','seed'),
+('Heretic Cape','Cape','Artifact Capes','any','seed'),
+('Keeper Cape','Cape','Artifact Capes','any','seed'),
+('Morgana Cape','Cape','Artifact Capes','any','seed'),
+('Thetford Cape','Cape','City Capes','any','seed'),
+('Fort Sterling Cape','Cape','City Capes','any','seed'),
+('Lymhurst Cape','Cape','City Capes','any','seed'),
+('Bridgewatch Cape','Cape','City Capes','any','seed'),
+('Martlock Cape','Cape','City Capes','any','seed'),
+('Caerleon Cape','Cape','City Capes','any','seed'),
+('Brecilien Cape','Cape','City Capes','any','seed'),
+('Smuggler Cape','Cape','City Capes','any','seed'),
+
+-- ============================================================
+-- BAGS (families — any tier)
+-- ============================================================
+
+('Bag','Bag','Standard Bags','any','seed'),
+('Satchel of Insight','Bag','Artifact Bags','any','seed'),
+('Avalonian Bag','Bag','Artifact Bags','any','seed')
 
 
 ON CONFLICT (name) DO NOTHING;

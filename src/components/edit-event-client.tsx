@@ -54,8 +54,8 @@ function draftFrom(event: {
   event_parties: Array<{
     id: string; name: string; fill_note: string | null; sort_order: number;
     event_slots: Array<{
-      id: string; role: string; equipment: string; tier_requirement: string;
-      notes: string | null; priority: string; required: boolean; sort_order: number;
+      id: string; role: string; notes: string | null; priority: string; required: boolean; sort_order: number;
+      event_slot_requirements: Array<{ id: string; category: string; item: string; tier_requirement: string; sort_order: number }>;
       event_signups: Array<{ ign: string }>;
     }>;
   }>;
@@ -79,11 +79,18 @@ function draftFrom(event: {
       slots: p.event_slots.map((s) => ({
         id: s.id,
         role: s.role,
-        equipment: s.equipment,
-        tier_requirement: s.tier_requirement || "any",
         notes: s.notes ?? "",
         priority: s.priority as SlotPriority,
         required: s.required,
+        requirements: (s.event_slot_requirements ?? [])
+          .slice()
+          .sort((a, b) => a.sort_order - b.sort_order)
+          .map((r) => ({
+            id: r.id,
+            category: r.category,
+            item: r.item,
+            tier_requirement: r.tier_requirement || "any",
+          })),
         assignedIgn: s.event_signups[0]?.ign ?? null,
       })),
     })),

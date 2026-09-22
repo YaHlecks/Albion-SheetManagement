@@ -18,6 +18,7 @@
 
 -- 1. New application tables -------------------------------------------------
 drop table if exists public.event_signups cascade;
+drop table if exists public.event_slot_requirements cascade;
 drop table if exists public.event_slots cascade;
 drop table if exists public.event_parties cascade;
 drop table if exists public.events cascade;

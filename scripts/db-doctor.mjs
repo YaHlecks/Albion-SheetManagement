@@ -46,8 +46,8 @@ const client = new pg.Client({
 });
 
 const TABLES = [
-  "profiles", "events", "event_parties", "event_slots", "event_signups",
-  "albion_equipment", "notifications", "audit_logs",
+  "profiles", "events", "event_parties", "event_slots", "event_slot_requirements",
+  "event_signups", "albion_equipment", "notifications", "audit_logs",
 ];
 
 /** What the application is supposed to be able to do, per role. */
@@ -128,7 +128,8 @@ async function main() {
     ["notifications", ["id", "user_id", "title", "body", "kind", "link", "read", "created_at"]],
     ["events", ["id", "title", "description", "event_date", "massing_time", "timezone", "location", "portal", "set_name", "caller", "instructions", "status", "is_template", "created_by", "created_at", "updated_at"]],
     ["event_parties", ["id", "event_id", "name", "fill_note", "sort_order"]],
-    ["event_slots", ["id", "party_id", "role", "equipment", "tier_requirement", "notes", "priority", "required", "sort_order"]],
+    ["event_slots", ["id", "party_id", "role", "notes", "priority", "required", "sort_order"]],
+    ["event_slot_requirements", ["id", "slot_id", "category", "item", "tier_requirement", "sort_order"]],
     ["event_signups", ["id", "slot_id", "event_id", "user_id", "ign", "note", "signed_up_at"]],
     ["albion_equipment", ["id", "name", "category", "family", "tier", "icon_url", "active"]],
     ["audit_logs", ["id", "action", "actor_id", "target_user_id", "event_id", "meta", "created_at"]],
@@ -144,6 +145,28 @@ async function main() {
     if (table === "notifications" && have.has("type")) {
       report(false, "notifications has no stray 'type' column", "frontend must select `kind`, not `type`");
     }
+    if (table === "event_slots" && have.has("equipment")) {
+      report(false, "event_slots has no legacy single 'equipment' column",
+        "run db:push — requirements now live in event_slot_requirements");
+    }
+  }
+
+  // Composable requirements contract: the table must exist and be populated
+  // correctly for any events that have slots.
+  if (present.has("event_slot_requirements")) {
+    const { rows: slotCounts } = await client.query(
+      `select
+         (select count(*)::int from public.event_slots) as slots,
+         (select count(*)::int from public.event_slot_requirements) as reqs`,
+    );
+    const slots = slotCounts[0]?.slots ?? 0;
+    const reqs = slotCounts[0]?.reqs ?? 0;
+    report(true, `slot requirements model active (${slots} slots, ${reqs} requirement rows)`);
+    const { rows: badCats } = await client.query(
+      `select distinct category from public.event_slot_requirements
+       where category not in ('Weapon','Head','Chest','Feet','Off-Hand','Mount','Cape','Bag','Other')`,
+    );
+    report(badCats.length === 0, "requirement categories all within taxonomy", badCats.length ? badCats.map((r) => r.category).join(", ") : undefined);
   }
 
   // Equipment catalog sanity: unique names + the seeded families the picker
@@ -156,12 +179,18 @@ async function main() {
   );
   report(dupEq.length === 0, "no duplicate equipment names", dupEq.length ? dupEq.map((r) => r.n).join(", ") : undefined);
   const { rows: famRows } = await client.query(
-    `select distinct family from public.albion_equipment where category = 'Weapon'`,
+    `select distinct category, family from public.albion_equipment`,
   );
-  const fams = new Set(famRows.map((r) => r.family));
+  const catFams = new Map(famRows.map((r) => [r.category, new Set()]));
+  for (const r of famRows) catFams.get(r.category)?.add(r.family);
   for (const f of ["Swords", "Axes", "Maces", "Hammers", "Spears", "Quarterstaffs", "Daggers", "Bows", "Crossbows", "Fire Staffs", "Frost Staffs", "Arcane Staffs", "Holy Staffs", "Nature Staffs", "Cursed Staffs", "War Gloves", "Shapeshifter Staffs"]) {
-    report(fams.has(f), `weapon family ${f} seeded`);
+    report(catFams.get("Weapon")?.has(f), `weapon family ${f} seeded`);
   }
+  for (const c of ["Mount", "Cape", "Bag", "Head", "Chest", "Feet", "Off-Hand"]) {
+    report((catFams.get(c)?.size ?? 0) > 0, `equipment category ${c} seeded`, (catFams.get(c)?.size ?? 0) > 0 ? `${catFams.get(c).size} families` : "EMPTY → picker tab unusable");
+  }
+  const battleMounts = catFams.get("Mount")?.has("Battle Mounts");
+  report(Boolean(battleMounts), "battle-mount roster seeded (Command Mammoth, Tower Chariot, basilisks…)");
 
   // Legacy functions must be GONE (old Team/mass architecture).
   const LEGACY_FNS = [
@@ -292,12 +321,27 @@ async function main() {
       `select public.save_event(null, jsonb_build_object(
         'title', '__doctor_probe__', 'parties',
         jsonb_build_array(jsonb_build_object('name', 'Party 1', 'slots',
-          jsonb_build_array(jsonb_build_object('role', 'Tank', 'equipment', 'Heavy Mace')))))) as res;`,
+          jsonb_build_array(jsonb_build_object('role', 'Tank', 'requirements',
+            jsonb_build_array(
+              jsonb_build_object('category', 'Weapon', 'item', 'Heavy Mace'),
+              jsonb_build_object('category', 'Off-Hand', 'item', 'Shield')))))))) as res;`,
       claims);
     const svOk = sv.ok && sv.rows?.[0]?.res?.ok === true;
     report(svOk, "save_event RPC succeeds for admin session",
-      svOk ? "event + party + slot + audit (rolled back)"
+      svOk ? "event + party + slot + 2 requirements + audit (rolled back)"
         : `FAILED → ${sv.rows?.[0]?.res?.error ?? sv.code ?? sv.message}`);
+
+    // Compose-proof: the saved probe event must have BOTH requirement rows.
+    if (svOk) {
+      const { rows: reqCheck } = await client.query(
+        `select count(*)::int as n from public.event_slot_requirements esr
+         join public.event_slots es on es.id = esr.slot_id
+         join public.event_parties ep on ep.id = es.party_id
+         where ep.event_id = (select id from public.events where title = '__doctor_probe__')`,
+      );
+      report((reqCheck[0]?.n ?? 0) >= 2, "save_event persists composable requirements",
+        `${reqCheck[0]?.n ?? 0} requirement rows saved`);
+    }
 
     // Signup race: two claims on one slot — exactly one must win.
     if (svOk) {
@@ -306,7 +350,8 @@ async function main() {
         select public.save_event(null, jsonb_build_object(
           'title', '__doctor_race__', 'parties',
           jsonb_build_array(jsonb_build_object('name', 'P1', 'slots',
-            jsonb_build_array(jsonb_build_object('role', 'Tank', 'equipment', 'Mace')))))) as res;`,
+            jsonb_build_array(jsonb_build_object('role', 'Tank', 'requirements',
+              jsonb_build_array(jsonb_build_object('category', 'Weapon', 'item', 'Mace')))))))) as res;`,
         claims);
       const eventId = raceProbe.rows?.[0]?.res?.id;
       if (eventId) {

@@ -1,16 +1,17 @@
 "use client";
 
 /**
- * Albion equipment browser (Phase 4/6/26): search the catalog in the
- * database (debounced, server-side ilike) — icons, family, tier options —
- * with a permanent "custom build" escape hatch (Phase 5: guild shorthand
- * like "HOJ (Knight)" never has to exist in the catalog).
+ * Albion equipment browser: category → family → search over the catalog in
+ * the database (debounced, server-side ilike). Covers the full taxonomy —
+ * Weapon, Head, Chest, Feet, Off-Hand, Mount (incl. battle mounts), Cape,
+ * Bag — with a permanent free-text escape hatch so group shorthand
+ * ("SOB / ICICLE") never has to exist in the catalog.
  *
- * Organization aid only (Phase 27): it never recommends or overrides —
- * the admin picks.
+ * It never recommends or overrides — the admin picks.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createBrowserClient } from "@/lib/supabase-browser";
+import { EQUIPMENT_CATEGORIES, TIER_OPTIONS } from "@/lib/events";
 
 export interface EquipmentRow {
   id: string;
@@ -18,14 +19,11 @@ export interface EquipmentRow {
   category: string;
   family: string;
   tier: string;
-  item_power: number | null;
   icon_url: string | null;
 }
 
-const TIER_OPTIONS = ["any", "T4", "T4.1", "T5", "T5.1", "T6", "T6.1", "T7", "T7.1", "T8", "T8.1"];
-
 export function EquipmentPicker({ onPick, onClose }: {
-  onPick: (name: string, tierRequirement: string) => void;
+  onPick: (category: string, name: string, tierRequirement: string) => void;
   onClose: () => void;
 }) {
   const supabase = useMemo(() => createBrowserClient(), []);
@@ -36,6 +34,7 @@ export function EquipmentPicker({ onPick, onClose }: {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [custom, setCustom] = useState("");
+  const [customCategory, setCustomCategory] = useState("Weapon");
   const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [families, setFamilies] = useState<string[]>([]);
@@ -46,10 +45,8 @@ export function EquipmentPicker({ onPick, onClose }: {
         .select("category, family")
         .eq("active", true)
         .limit(1000);
-      const cats = new Set<string>();
       const fams = new Set<string>();
       for (const r of data ?? []) {
-        cats.add(r.category);
         if (category === "all" || r.category === category) fams.add(r.family);
       }
       setFamilies([...fams].sort());
@@ -64,7 +61,7 @@ export function EquipmentPicker({ onPick, onClose }: {
         setError(null);
         let q = supabase
           .from("albion_equipment")
-          .select("id, name, category, family, tier, item_power, icon_url")
+          .select("id, name, category, family, tier, icon_url")
           .eq("active", true)
           .order("name")
           .limit(50);
@@ -88,7 +85,7 @@ export function EquipmentPicker({ onPick, onClose }: {
         <input
           type="search"
           className="field sm:flex-1"
-          placeholder="Search equipment… (mace, hallowfall, bow)"
+          placeholder="Search equipment… (mace, chariot, guardian)"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           autoFocus
@@ -96,13 +93,9 @@ export function EquipmentPicker({ onPick, onClose }: {
         />
         <select className="field sm:w-40" value={category} onChange={(e) => { setCategory(e.target.value); setFamily("all"); }} aria-label="Category">
           <option value="all">All categories</option>
-          <option value="Weapon">Weapon</option>
-          <option value="Armor">Armor</option>
-          <option value="Helmet">Helmet</option>
-          <option value="Shoes">Shoes</option>
-          <option value="Off-Hand">Off-Hand</option>
+          {EQUIPMENT_CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
         </select>
-        <select className="field sm:w-44" value={family} onChange={(e) => setFamily(e.target.value)} aria-label="Family">
+        <select className="field sm:w-48" value={family} onChange={(e) => setFamily(e.target.value)} aria-label="Family">
           <option value="all">All families</option>
           {families.map((f) => <option key={f} value={f}>{f}</option>)}
         </select>
@@ -113,7 +106,7 @@ export function EquipmentPicker({ onPick, onClose }: {
         {error && <p className="p-4 text-sm text-danger" role="alert">{error}</p>}
         {!loading && !error && rows.length === 0 && (
           <p className="p-4 text-sm text-muted">
-            No matches. Use the custom-build field below — group shorthand like
+            No matches. Use the custom entry below — group shorthand like
             &quot;HvyMace (Guardian)&quot; doesn&apos;t need to be a catalog item.
           </p>
         )}
@@ -127,14 +120,14 @@ export function EquipmentPicker({ onPick, onClose }: {
             )}
             <div className="min-w-0 flex-1">
               <p className="truncate text-sm font-medium text-ink">{row.name}</p>
-              <p className="text-xs text-faint">{row.category} · {row.family}{row.tier !== "any" ? ` · T${row.tier}` : ""}</p>
+              <p className="text-xs text-faint">{row.category} · {row.family}</p>
             </div>
             <select
               className="field h-8 w-24 text-xs"
               defaultValue="any"
               aria-label={`Tier requirement for ${row.name}`}
               onChange={(e) => {
-                onPick(row.name, e.target.value);
+                onPick(row.category, row.name, e.target.value);
                 onClose();
               }}
             >
@@ -145,11 +138,14 @@ export function EquipmentPicker({ onPick, onClose }: {
       </div>
 
       <div className="rounded-lg border border-dashed border-line-strong p-3">
-        <label htmlFor="custom-build" className="field-label">Custom group build / label</label>
-        <div className="flex gap-2">
+        <label htmlFor="custom-build" className="field-label">Custom entry / group shorthand</label>
+        <div className="flex flex-wrap gap-2">
+          <select className="field w-32" value={customCategory} onChange={(e) => setCustomCategory(e.target.value)} aria-label="Custom category">
+            {EQUIPMENT_CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
+          </select>
           <input
             id="custom-build"
-            className="field flex-1"
+            className="field min-w-0 flex-1"
             placeholder="e.g. HvyMace (Guardian), SOB/ICICLE…"
             value={custom}
             onChange={(e) => setCustom(e.target.value)}
@@ -160,7 +156,7 @@ export function EquipmentPicker({ onPick, onClose }: {
             className="btn btn-secondary"
             disabled={custom.trim().length < 2}
             onClick={() => {
-              onPick(custom.trim(), "any");
+              onPick(customCategory, custom.trim(), "any");
               onClose();
             }}
           >
@@ -171,5 +167,3 @@ export function EquipmentPicker({ onPick, onClose }: {
     </div>
   );
 }
-
-export { TIER_OPTIONS };
