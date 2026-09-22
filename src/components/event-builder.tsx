@@ -231,10 +231,7 @@ export function EventBuilder({ draft, onChange, busy, onSave, onCancel, saveLabe
             </div>
           ))}
           <datalist id="event-roles">{ROLES.map((r) => <option key={r} value={r} />)}</datalist>
-          <datalist id="event-equipment">
-            {["Heavy Mace", "Mace", "Carving", "Hallowfall", "Fallen", "Blight", "Rootbound", "Any DPS", "FILL"].map((x) => <option key={x} value={x} />)}
-          </datalist>
-          <p className="field-hint">Roles and equipment are suggestions — type anything custom (e.g. “SOB / ICICLE”, “Any DPS”).</p>
+          <p className="field-hint">Roles and equipment are suggestions — use the Browse picker for the real catalog, or type group shorthand (e.g. “SOB / ICICLE”, “Any DPS”).</p>
         </div>
       )}
 

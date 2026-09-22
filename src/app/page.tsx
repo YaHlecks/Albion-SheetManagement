@@ -76,8 +76,8 @@ export default function LandingPage() {
           <div className="max-w-3xl">
             <p className="badge badge-admin mb-5 inline-flex">Built for Albion Online guilds</p>
             <h1 className="hero-title">
-              Run your Albion masses without the{" "}
-              <span className="text-brand">chaos of shared spreadsheets</span>.
+              Run your Albion masses without{" "}
+              <span className="text-brand">the chaos of shared spreadsheets</span>.
             </h1>
             <p className="mt-5 max-w-2xl text-lg text-muted">
               The admin plans the mass, publishes the sheet, and members sign themselves into

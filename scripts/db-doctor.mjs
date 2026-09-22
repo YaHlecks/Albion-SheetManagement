@@ -120,6 +120,49 @@ async function main() {
     report(cols.has(c), `profiles.${c} exists`, cols.has(c) ? "ok" : "MISSING → 42703 on profile loads");
   }
 
+  // Frontend column contract: every column the UI selects must exist with the
+  // exact name the code uses. (notifications.type previously did not exist —
+  // the UI selected it and every notification load silently failed.)
+  console.error("\nColumn contracts (frontend selects):")
+  for (const [table, expected] of [
+    ["notifications", ["id", "user_id", "title", "body", "kind", "link", "read", "created_at"]],
+    ["events", ["id", "title", "description", "event_date", "massing_time", "timezone", "location", "portal", "set_name", "caller", "instructions", "status", "is_template", "created_by", "created_at", "updated_at"]],
+    ["event_parties", ["id", "event_id", "name", "fill_note", "sort_order"]],
+    ["event_slots", ["id", "party_id", "role", "equipment", "tier_requirement", "notes", "priority", "required", "sort_order"]],
+    ["event_signups", ["id", "slot_id", "event_id", "user_id", "ign", "note", "signed_up_at"]],
+    ["albion_equipment", ["id", "name", "category", "family", "tier", "icon_url", "active"]],
+    ["audit_logs", ["id", "action", "actor_id", "target_user_id", "event_id", "meta", "created_at"]],
+  ]) {
+    const { rows: tCols } = await client.query(
+      `select column_name from information_schema.columns where table_schema='public' and table_name=$1`,
+      [table],
+    );
+    const have = new Set(tCols.map((r) => r.column_name));
+    for (const c of expected) {
+      report(have.has(c), `${table}.${c} exists`, have.has(c) ? "ok" : "MISSING → frontend selects fail (42703/PGRST204)");
+    }
+    if (table === "notifications" && have.has("type")) {
+      report(false, "notifications has no stray 'type' column", "frontend must select `kind`, not `type`");
+    }
+  }
+
+  // Equipment catalog sanity: unique names + the seeded families the picker
+  // filters by. A broken seed shows up as an empty or duplicated catalog.
+  console.error("\nEquipment catalog:");
+  const { rows: eqCount } = await client.query(`select count(*)::int as n from public.albion_equipment where active`);
+  report((eqCount[0]?.n ?? 0) > 100, `catalog populated (${eqCount[0]?.n ?? 0} active items)`, (eqCount[0]?.n ?? 0) > 100 ? "ok" : "EMPTY → equipment picker unusable (run db:push)");
+  const { rows: dupEq } = await client.query(
+    `select lower(name) as n, count(*)::int as c from public.albion_equipment group by lower(name) having count(*) > 1`,
+  );
+  report(dupEq.length === 0, "no duplicate equipment names", dupEq.length ? dupEq.map((r) => r.n).join(", ") : undefined);
+  const { rows: famRows } = await client.query(
+    `select distinct family from public.albion_equipment where category = 'Weapon'`,
+  );
+  const fams = new Set(famRows.map((r) => r.family));
+  for (const f of ["Swords", "Axes", "Maces", "Hammers", "Spears", "Quarterstaffs", "Daggers", "Bows", "Crossbows", "Fire Staffs", "Frost Staffs", "Arcane Staffs", "Holy Staffs", "Nature Staffs", "Cursed Staffs", "War Gloves", "Shapeshifter Staffs"]) {
+    report(fams.has(f), `weapon family ${f} seeded`);
+  }
+
   // Legacy functions must be GONE (old Team/mass architecture).
   const LEGACY_FNS = [
     "create_team", "admin_action", "handle_membership_change", "log_audit",

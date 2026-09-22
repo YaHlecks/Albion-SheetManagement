@@ -401,6 +401,12 @@ begin
     v_is_new := true;
     insert into public.audit_logs (action, actor_id, event_id, meta)
     values ('EVENT_CREATED', v_actor, v_event_id, jsonb_build_object('title', v_title));
+  else
+    -- The event must exist and belong to this database (guards editing a
+    -- concurrently-deleted event: without this row the UPDATE is a silent no-op).
+    if not exists (select 1 from public.events where id = v_event_id) then
+      return jsonb_build_object('ok', false, 'error', 'NOT_FOUND');
+    end if;
   end if;
 
   update public.events set
@@ -651,7 +657,9 @@ begin
   select * into v_old from public.event_signups where event_id = v_slot.event_id and user_id = p_user_id;
 
   if p_user_id is null then
-    if v_old is null then return jsonb_build_object('ok', true); end if;
+    -- Remove the signup occupying this slot (slot currently filled).
+    select * into v_old from public.event_signups where slot_id = p_slot_id;
+    if not found then return jsonb_build_object('ok', true); end if;
     delete from public.event_signups where slot_id = p_slot_id;
     insert into public.audit_logs (action, actor_id, target_user_id, event_id, meta)
     values ('SIGNUP_REMOVED', auth.uid(), v_old.user_id, v_event.id,
@@ -1335,7 +1343,6 @@ VALUES
 ('Ravenstrike Cestus','Weapon','War Gloves','any','seed'),
 ('Fists of Avalon','Weapon','War Gloves','any','seed'),
 ('Forcepulse Bracers','Weapon','War Gloves','any','seed'),
-('Black Hands','Weapon','War Gloves','any','seed'),
 
 
 -- ============================================================

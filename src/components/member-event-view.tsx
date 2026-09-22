@@ -4,7 +4,7 @@
  * Member event experience (§14/§11/§36): mass-sheet header, instructions,
  * live fill stats, realtime updates, claim/leave via the signup RPCs.
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Badge } from "@/components/ui";
 import { useToast } from "@/components/toast";
@@ -37,6 +37,8 @@ export function MemberEventView({ eventId, initialEvent, userId }: {
   const supabase = createBrowserClient();
   const [event, setEvent] = useState<EventFull>(initialEvent);
   const [reloadError, setReloadError] = useState(false);
+  /** One in-flight signup action at a time — duplicate submits caused 429s. */
+  const actionBusy = useRef(false);
 
   const reload = useCallback(async () => {
     try {
@@ -60,6 +62,18 @@ export function MemberEventView({ eventId, initialEvent, userId }: {
   const when = formatMassingTime(event.event_date, event.massing_time, event.timezone);
 
   const onAction = async (action: { kind: string; slot: { id: string }; note?: string }) => {
+    // Re-entrancy guard: a double-click (or StrictMode double-invoke) must not
+    // fire two signup RPCs — the second was rejected by Supabase as 429.
+    if (actionBusy.current) return;
+    actionBusy.current = true;
+    try {
+      await runSignupAction(action);
+    } finally {
+      actionBusy.current = false;
+    }
+  };
+
+  const runSignupAction = async (action: { kind: string; slot: { id: string }; note?: string }) => {
     if (action.kind === "claim") {
       try {
         await claimEventSlot(supabase, action.slot.id, action.note);

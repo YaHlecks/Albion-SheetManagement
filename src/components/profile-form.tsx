@@ -23,13 +23,22 @@ export function ProfileForm({ ign, discord, email }: { ign: string; discord: str
     setSaving(true);
     try {
       const supabase = createBrowserClient();
-      const { error } = await supabase
-        .from("profiles")
-        .update({ ign: parsed.data.ign, discord: parsed.data.discord || null })
-        .eq("id", (await supabase.auth.getUser()).data.user?.id ?? "");
+      // RLS only allows admins to UPDATE profiles directly — the member path
+      // is the security-definer RPC (identity from auth.uid(), scoped columns,
+      // IGN uniqueness mapped to a friendly error).
+      const { data, error } = await supabase.rpc("update_own_profile", {
+        p_ign: parsed.data.ign,
+        p_discord: parsed.data.discord || null,
+      });
 
       if (error) {
-        toast.error(error.message.includes("duplicate") || error.message.includes("unique")
+        console.error("[profile] update failed:", error.message);
+        toast.error("Could not save your profile.");
+        return;
+      }
+      const res = data as { ok?: boolean; error?: string } | null;
+      if (!res?.ok) {
+        toast.error(res?.error === "IGN_TAKEN"
           ? "This IGN is already taken."
           : "Could not save your profile.");
         return;

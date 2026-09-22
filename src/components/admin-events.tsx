@@ -132,30 +132,33 @@ export function AdminEvents({ events, fillCounts }: {
         </div>
       )}
 
-      <ConfirmDialog
-        open={confirm !== null}
-        title={confirm?.kind === "duplicate" ? "Duplicate event?" : CONFIRM_COPY[confirm?.next ?? ""].title}
-        body={
-          confirm?.kind === "duplicate"
-            ? `"${confirm.event.title}" will be copied with the same parties and slots but WITHOUT signups. The copy starts as a draft.`
-            : confirm ? CONFIRM_COPY[confirm.next].body : ""
-        }
-        confirmLabel={confirm?.kind === "duplicate" ? "Duplicate" : confirm ? CONFIRM_COPY[confirm.next].label : "Confirm"}
-        danger={confirm?.kind === "duplicate" ? false : CONFIRM_COPY[confirm?.next ?? ""].danger}
-        busy={busy}
-        onCancel={() => setConfirm(null)}
-        onConfirm={() => {
-          if (!confirm) return;
-          if (confirm.kind === "duplicate") {
-            void run(async () => {
-              const id = await duplicateEvent(supabase, confirm.event.id);
-              router.push(`/admin/events/${id}/edit`);
-            });
-          } else {
-            void run(() => setEventStatus(supabase, confirm.event.id, confirm.next));
+      {/* Rendered only while a confirm action is pending — copying the record
+          eagerly (CONFIRM_COPY[...].title with next="") crashed the page. */}
+      {confirm !== null && (
+        <ConfirmDialog
+          open
+          title={confirm.kind === "duplicate" ? "Duplicate event?" : CONFIRM_COPY[confirm.next].title}
+          body={
+            confirm.kind === "duplicate"
+              ? `"${confirm.event.title}" will be copied with the same parties and slots but WITHOUT signups. The copy starts as a draft.`
+              : CONFIRM_COPY[confirm.next].body
           }
-        }}
-      />
+          confirmLabel={confirm.kind === "duplicate" ? "Duplicate" : CONFIRM_COPY[confirm.next].label}
+          danger={confirm.kind !== "duplicate" && CONFIRM_COPY[confirm.next].danger}
+          busy={busy}
+          onCancel={() => setConfirm(null)}
+          onConfirm={() => {
+            if (confirm.kind === "duplicate") {
+              void run(async () => {
+                const id = await duplicateEvent(supabase, confirm.event.id);
+                router.push(`/admin/events/${id}/edit`);
+              });
+            } else {
+              void run(() => setEventStatus(supabase, confirm.event.id, confirm.next));
+            }
+          }}
+        />
+      )}
     </div>
   );
 }

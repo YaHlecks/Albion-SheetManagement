@@ -151,11 +151,13 @@ export const getSessionContext = cache(async (): Promise<SessionContext | null> 
   // lock as the signup trigger; a no-op for everyone else. Fires on session
   // resolution (not just login) so it also repairs direct-URL visits and
   // refreshes, and keeps service-role and anon-key modes consistent.
-  if (profile && !profile.isPlatformAdmin) {
+  if (profile && !profile.isPlatformAdmin && !hasServiceRole()) {
+    // Anon-key mode only: the RPC resolves the caller from the request JWT, so
+    // it must run under the user's own session. (The service-role admin client
+    // carries no JWT — auth.uid() is null there and the RPC would no-op.)
+    // In service-role mode the signup trigger + db:bootstrap cover provisioning.
     try {
-      const { data: claim } = hasServiceRole()
-        ? await createAdminClient().rpc("claim_first_admin")
-        : await supabase.rpc("claim_first_admin");
+      const { data: claim } = await supabase.rpc("claim_first_admin");
       if (claim?.promoted) {
         profile = { ...profile, status: claim.status as AccountStatus, isPlatformAdmin: true };
         isPlatformAdmin = true;

@@ -55,7 +55,7 @@ export function EventSheet({ event, currentUserId, isAdmin, editable, onAction }
   const filtering = search !== "" || roleFilter !== "all" || partyFilter !== "all" || statusFilter !== "all";
 
   const confirmClaim = async () => {
-    if (!claimSlot) return;
+    if (!claimSlot || busy) return; // busy guard: no duplicate submissions
     setBusy(true);
     setError(null);
     try {

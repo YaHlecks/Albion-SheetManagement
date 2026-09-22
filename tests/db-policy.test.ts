@@ -41,6 +41,12 @@ describe("schema — tables & constraints", () => {
   it("supports templates (§15)", () => {
     expect(sql).toMatch(/is_template boolean not null default false/);
   });
+
+  it("notifications use `kind` — the UI never selects a `type` column", () => {
+    const table = sql.match(/create table if not exists public\.notifications[\s\S]*?\);/)![0];
+    expect(table).toMatch(/kind text/);
+    expect(table).not.toMatch(/\btype\b/);
+  });
 });
 
 describe("schema — no Team architecture remains (§46)", () => {
@@ -175,6 +181,17 @@ describe("RPCs — signup concurrency and admin flows (§10/§34)", () => {
   it("missing profile row can never silently succeed a signup", () => {
     expect(sql).toMatch(/claim_event_slot[\s\S]*?PROFILE_NOT_FOUND/);
   });
+
+  it("admin_set_signup(null) removes the signup occupying the slot (no silent no-op)", () => {
+    const fn = sql.match(/function public\.admin_set_signup[\s\S]*?\$\$;/)![0];
+    expect(fn).toMatch(/p_user_id is null then[\s\S]*?select \* into v_old from public\.event_signups where slot_id = p_slot_id/);
+    expect(fn).toMatch(/p_user_id is null then[\s\S]*?delete from public\.event_signups where slot_id = p_slot_id/);
+  });
+
+  it("save_event rejects edits to a nonexistent event instead of silently no-oping", () => {
+    const fn = sql.match(/function public\.save_event[\s\S]*?\$\$;/)![0];
+    expect(fn).toMatch(/error', 'NOT_FOUND'/);
+  });
 });
 
 describe("equipment catalog (§18–25)", () => {
@@ -190,7 +207,7 @@ describe("equipment catalog (§18–25)", () => {
       "Holy Staffs", "Nature Staffs", "Cursed Staffs", "War Gloves"]) {
       expect(sql).toContain(`'${family}'`);
     }
-    for (const item of ["Cryptcandle", "Mistcaller", "Taproot", "Facebreaker", "Leering Cane", "Shield", "Tome"]) {
+    for (const item of ["Cryptcandle", "Mistcaller", "Taproot", "Facebreaker", "Leering Cane", "Shield", "Tome of Spells"]) {
       expect(sql).toContain(`'${item}'`);
     }
     for (const cat of ["'Weapon'", "'Armor'", "'Helmet'", "'Shoes'", "'Off-Hand'"]) {
@@ -200,6 +217,18 @@ describe("equipment catalog (§18–25)", () => {
 
   it("tier_requirement is structured and CHECK-constrained", () => {
     expect(sql).toMatch(/tier_requirement in \('any','T4','T4\.1','T5','T5\.1','T6','T6\.1','T7','T7\.1','T8','T8\.1'\)/);
+  });
+
+  it("has no item in two families (Black Hands is a Dagger, not also War Gloves)", () => {
+    const names = [...sql.matchAll(/\('([^']+)'\s*,\s*'[^']+'\s*,\s*'[^']+'\s*,\s*'[^']+'\s*,\s*'seed'\)/g)].map((m) => m[1]);
+    const dupes = names.filter((n, i) => names.indexOf(n) !== i);
+    expect(dupes).toEqual([]);
+  });
+
+  it("weapon families match the current Albion weapon tree", () => {
+    for (const family of ["Swords", "Axes", "Maces", "Hammers", "Spears", "Quarterstaffs", "Daggers", "Bows", "Crossbows", "Fire Staffs", "Frost Staffs", "Arcane Staffs", "Holy Staffs", "Nature Staffs", "Cursed Staffs", "War Gloves", "Shapeshifter Staffs"]) {
+      expect(sql).toContain(`'${family}'`);
+    }
   });
 });
 

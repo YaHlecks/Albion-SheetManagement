@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import { Logo, Badge, Spinner } from "@/components/ui";
 import { cn, timeAgo } from "@/lib/utils";
+import { fetchNotifications, notificationTone, type NotificationRow } from "@/lib/notifications";
 import { createBrowserClient } from "@/lib/supabase-browser";
 
 export interface ShellUser {
@@ -26,16 +27,6 @@ export interface ShellUser {
   email: string;
   status: string;
   isPlatformAdmin: boolean;
-}
-
-interface NotificationItem {
-  id: string;
-  title: string;
-  body: string | null;
-  type: string;
-  read: boolean;
-  link: string | null;
-  created_at: string;
 }
 
 const memberNav = [
@@ -60,7 +51,7 @@ export function AppShell({ user, children }: { user: ShellUser; children: React.
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
-  const [notifications, setNotifications] = useState<NotificationItem[]>([]);
+  const [notifications, setNotifications] = useState<NotificationRow[]>([]);
   const [unread, setUnread] = useState(0);
   const [loadingNotifs, setLoadingNotifs] = useState(true);
   const [signingOut, setSigningOut] = useState(false);
@@ -83,15 +74,13 @@ export function AppShell({ user, children }: { user: ShellUser; children: React.
 
     async function load() {
       try {
-        const { data, error } = await supabase
-          .from("notifications")
-          .select("id, title, body, type, read, link, created_at")
-          .order("created_at", { ascending: false })
-          .limit(12);
-        if (error || cancelled) return;
-        const rows = (data ?? []) as NotificationItem[];
+        // Shared contract helper — selects `kind` (a `type` column does not exist).
+        const rows = await fetchNotifications(supabase, 12);
+        if (cancelled) return;
         setNotifications(rows);
         setUnread(rows.filter((n) => !n.read).length);
+      } catch {
+        // Transient network/RLS problem: keep the last known list, retry on interval.
       } finally {
         if (!cancelled) setLoadingNotifs(false);
       }
@@ -111,10 +100,12 @@ export function AppShell({ user, children }: { user: ShellUser; children: React.
       .from("notifications")
       .update({ read: true })
       .eq("read", false);
-    if (!error) {
-      setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
-      setUnread(0);
+    if (error) {
+      console.error("[notifications] mark-all-read failed:", error.message);
+      return;
     }
+    setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
+    setUnread(0);
   }
 
   async function handleSignOut() {
@@ -333,10 +324,9 @@ function NavItem({
   );
 }
 
-function NotificationRow({ n, onNavigate }: { n: NotificationItem; onNavigate: () => void }) {
+function NotificationRow({ n, onNavigate }: { n: NotificationRow; onNavigate: () => void }) {
   const router = useRouter();
-  const tone =
-    n.type === "success" ? "text-success" : n.type === "warning" || n.type === "error" ? "text-warn" : "text-info";
+  const tone = notificationTone(n.kind);
   return (
     <button
       type="button"
@@ -346,7 +336,7 @@ function NotificationRow({ n, onNavigate }: { n: NotificationItem; onNavigate: (
         if (n.link) router.push(n.link);
       }}
     >
-      <span className={cn("mt-1 h-2 w-2 shrink-0 rounded-full", n.read ? "bg-line-strong" : tone.replace("text-", "bg-"))} />
+      <span className={cn("mt-1 h-2 w-2 shrink-0 rounded-full", n.read ? "bg-line-strong" : `bg-${tone}`)} />
       <span className="min-w-0 flex-1 text-left">
         <span className="block truncate text-[13px] font-semibold text-ink">{n.title}</span>
         {n.body ? <span className="mt-0.5 block text-xs text-muted">{n.body}</span> : null}

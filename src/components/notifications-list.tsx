@@ -4,32 +4,47 @@ import { useState } from "react";
 import Link from "next/link";
 import { CheckCheck } from "lucide-react";
 import { createBrowserClient } from "@/lib/supabase-browser";
+import {
+  notificationTone,
+  type NotificationRow,
+} from "@/lib/notifications";
 import { cn, formatDateTime } from "@/lib/utils";
 
-export interface NotificationRowData {
-  id: string;
-  title: string;
-  body: string | null;
-  type: string;
-  read: boolean;
-  link: string | null;
-  created_at: string;
-}
-
-export function NotificationsList({ initial }: { initial: NotificationRowData[] }) {
+export function NotificationsList({ initial }: { initial: NotificationRow[] }) {
   const [items, setItems] = useState(initial);
+  const [busy, setBusy] = useState(false);
   const unread = items.filter((n) => !n.read).length;
 
   async function markAllRead() {
-    setItems((prev) => prev.map((n) => ({ ...n, read: true })));
-    const supabase = createBrowserClient();
-    await supabase.from("notifications").update({ read: true }).eq("read", false);
+    setBusy(true);
+    try {
+      // Optimistic update first; the RLS policy scopes the update to the
+      // caller's own rows (user_id = auth.uid()), so no id filter is needed.
+      setItems((prev) => prev.map((n) => ({ ...n, read: true })));
+      const supabase = createBrowserClient();
+      const { error } = await supabase.from("notifications").update({ read: true }).eq("read", false);
+      if (error) throw error;
+    } catch (err) {
+      console.error("[notifications] mark-all-read failed:", err);
+      // Re-fetch authoritative state on failure instead of leaving a lie on screen.
+      const supabase = createBrowserClient();
+      const { data } = await supabase
+        .from("notifications")
+        .select("id, title, body, kind, read, link, created_at")
+        .order("created_at", { ascending: false })
+        .limit(50);
+      if (data) setItems(data as NotificationRow[]);
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function markRead(id: string) {
+    if (items.find((n) => n.id === id)?.read) return;
     setItems((prev) => prev.map((n) => (n.id === id ? { ...n, read: true } : n)));
     const supabase = createBrowserClient();
-    await supabase.from("notifications").update({ read: true }).eq("id", id);
+    const { error } = await supabase.from("notifications").update({ read: true }).eq("id", id);
+    if (error) console.error("[notifications] mark-read failed:", error.message);
   }
 
   return (
@@ -39,26 +54,31 @@ export function NotificationsList({ initial }: { initial: NotificationRowData[] 
           {unread > 0 ? `${unread} unread` : "All read"}
         </p>
         {unread > 0 ? (
-          <button type="button" className="btn btn-secondary btn-sm gap-1.5" onClick={markAllRead}>
-            <CheckCheck size={14} /> Mark all read
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm gap-1.5"
+            onClick={() => void markAllRead()}
+            disabled={busy}
+          >
+            <CheckCheck size={14} /> {busy ? "Marking…" : "Mark all read"}
           </button>
         ) : null}
       </div>
 
       <div className="panel divide-y divide-line overflow-hidden">
         {items.map((n) => {
-          const tone =
-            n.type === "success"
-              ? "bg-success"
-              : n.type === "warning" || n.type === "error"
-                ? "bg-warn"
-                : "bg-info";
+          const tone = notificationTone(n.kind);
+          const toneBg =
+            tone === "success" ? "bg-success"
+            : tone === "danger" ? "bg-danger"
+            : tone === "brand" ? "bg-brand"
+            : "bg-info";
           const content = (
             <div
               className={cn("flex items-start gap-3 px-4 py-3.5", !n.read && "notif-unread")}
               onClick={() => void markRead(n.id)}
             >
-              <span className={cn("mt-1.5 h-2 w-2 shrink-0 rounded-full", n.read ? "bg-line-strong" : tone)} />
+              <span className={cn("mt-1.5 h-2 w-2 shrink-0 rounded-full", n.read ? "bg-line-strong" : toneBg)} />
               <div className="min-w-0 flex-1">
                 <p className="text-sm font-semibold text-ink">{n.title}</p>
                 {n.body ? <p className="mt-0.5 text-sm text-muted">{n.body}</p> : null}
